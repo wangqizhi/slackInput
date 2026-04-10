@@ -10,7 +10,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align, FontData, FontDefinitions, FontFamily, Layout, RichText, TextEdit};
+use eframe::egui::{
+    self, vec2, Align, Color32, FontData, FontDefinitions, FontFamily, Layout, RichText, ScrollArea,
+    Sense, TextEdit,
+};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::{
@@ -97,12 +100,8 @@ impl Language {
 struct I18n {
     title: &'static str,
     controller: &'static str,
-    connected: &'static str,
-    disconnected: &'static str,
-    capturing_active: &'static str,
-    capturing_paused: &'static str,
-    device_name: &'static str,
-    device_count: &'static str,
+    active: &'static str,
+    inactive: &'static str,
     preset: &'static str,
     mapping: &'static str,
     mapping_hint: &'static str,
@@ -137,17 +136,13 @@ fn tr(language: Language) -> I18n {
         Language::English => I18n {
             title: "SlackInput",
             controller: "Controller Status",
-            connected: "Connected",
-            disconnected: "Not connected",
-            capturing_active: "Capture active",
-            capturing_paused: "Capture paused",
-            device_name: "Device",
-            device_count: "Count",
+            active: "Active",
+            inactive: "Inactive",
             preset: "Preset",
             mapping: "Xbox Button Mapping",
             mapping_hint: "Examples: Ctrl+Win+Left, Alt+Tab, Ctrl+Shift+Esc",
             capture: "Enable input capture",
-            debug: "Enable debug logging",
+            debug: "Debug Window",
             save: "Save",
             reset: "Reset",
             logs: "Debug Log",
@@ -174,17 +169,13 @@ fn tr(language: Language) -> I18n {
         Language::Chinese => I18n {
             title: "SlackInput",
             controller: "手柄状态",
-            connected: "已连接",
-            disconnected: "未连接",
-            capturing_active: "正在捕获",
-            capturing_paused: "捕获已暂停",
-            device_name: "设备",
-            device_count: "数量",
+            active: "已连接",
+            inactive: "未连接",
             preset: "常用映射",
             mapping: "Xbox 键映射",
             mapping_hint: "格式示例: Ctrl+Win+Left, Alt+Tab, Ctrl+Shift+Esc",
             capture: "启用输入捕获",
-            debug: "启用调试日志",
+            debug: "调试窗口",
             save: "保存配置",
             reset: "恢复默认",
             logs: "调试日志",
@@ -243,7 +234,7 @@ struct MapperApp {
     debug_logging: bool,
     selected_preset: usize,
     language: Language,
-    logs_expanded: bool,
+    debug_window_open: bool,
 }
 
 impl MapperApp {
@@ -258,7 +249,7 @@ impl MapperApp {
             capture_enabled: config.capture_enabled,
             debug_logging: config.debug_logging,
             language: config.language,
-            logs_expanded: false,
+            debug_window_open: config.debug_logging,
         }
     }
 
@@ -319,28 +310,25 @@ impl eframe::App for MapperApp {
             )
         };
         let text = tr(self.language);
+        let was_debug_window_open = self.debug_window_open;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading(text.title);
             ui.group(|ui| {
                 ui.label(RichText::new(text.controller).strong());
-                let connection = if connected_devices.is_empty() {
-                    text.disconnected
+                let is_active = !connected_devices.is_empty();
+                let indicator_color = if is_active {
+                    Color32::from_rgb(46, 204, 113)
                 } else {
-                    text.connected
+                    Color32::from_rgb(231, 76, 60)
                 };
-                let capture_state = if self.capture_enabled {
-                    text.capturing_active
-                } else {
-                    text.capturing_paused
-                };
-                ui.label(format!("{connection} | {capture_state}"));
-                ui.label(format!("{}: {}", text.device_count, connected_devices.len()));
-                let device_text = connected_devices
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "-".to_string());
-                ui.label(format!("{}: {}", text.device_name, device_text));
+                let indicator_text = if is_active { text.active } else { text.inactive };
+
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 5.0, indicator_color);
+                    ui.label(RichText::new(indicator_text).strong().color(indicator_color));
+                });
             });
             ui.add_space(6.0);
 
@@ -371,12 +359,14 @@ impl eframe::App for MapperApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.capture_enabled, text.capture);
-                if ui.checkbox(&mut self.debug_logging, text.debug).changed() {
+                if ui.button(text.debug).clicked() {
+                    self.debug_window_open = true;
+                    self.debug_logging = true;
                     app_state()
                         .lock()
                         .expect("app state mutex poisoned")
                         .config
-                        .debug_logging = self.debug_logging;
+                        .debug_logging = true;
                 }
             });
 
@@ -411,21 +401,32 @@ impl eframe::App for MapperApp {
 
             ui.add_space(8.0);
             ui.label(RichText::new(status).strong());
-            ui.add_space(4.0);
-            let logs_response = egui::CollapsingHeader::new(text.logs)
-                .id_salt("debug_logs")
-                .open(Some(self.logs_expanded))
-                .show(ui, |ui| {
-                    self.logs_expanded = true;
-                    ui.add(
-                        TextEdit::multiline(&mut logs.as_str())
-                            .desired_rows(12)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false),
-                    );
-                });
-            self.logs_expanded = !logs_response.fully_closed();
         });
+
+        if self.debug_window_open {
+            egui::Window::new(text.logs)
+                .id(egui::Id::new("debug_log_window"))
+                .open(&mut self.debug_window_open)
+                .resizable(true)
+                .vscroll(true)
+                .default_size(vec2(680.0, 360.0))
+                .show(ctx, |ui| {
+                    ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(logs.as_str()).monospace()).wrap(),
+                        );
+                    });
+                });
+        }
+
+        if was_debug_window_open && !self.debug_window_open {
+            self.debug_logging = false;
+            app_state()
+                .lock()
+                .expect("app state mutex poisoned")
+                .config
+                .debug_logging = false;
+        }
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }
