@@ -1,0 +1,43 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# AI Editors / Assistants
+.cursor/
+.aider*
+.continue/
+.codeium/
+.tabnine/
+.copilot/
+.github/copilot/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+*.lnk
+
+# Logs
+*.log
+
+# Config (local dev)
+*.ini
