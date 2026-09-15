@@ -1,5 +1,11 @@
 #![windows_subsystem = "windows"]
 
+mod desktop;
+mod process;
+mod theme;
+mod titlebar;
+
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
@@ -11,33 +17,32 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, vec2, Align, Color32, FontData, FontDefinitions, FontFamily, Layout, RichText, ScrollArea,
-    Sense, TextEdit,
+    self, Align, Color32, FontData, FontDefinitions, FontFamily, Layout, RichText, ScrollArea,
+    Sense, TextEdit, vec2,
 };
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::{
-    GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, HRAWINPUT, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RIDI_DEVICEINFO, RIDI_DEVICENAME,
-    RID_DEVICE_INFO, RID_DEVICE_INFO_HID, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RID_INPUT,
-    RIM_TYPEHID, RegisterRawInputDevices,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-    VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT,
-    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
+use windows::Win32::UI::Input::{
+    GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, HRAWINPUT, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RID_DEVICE_INFO, RID_DEVICE_INFO_HID,
+    RID_INPUT, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDI_DEVICEINFO, RIDI_DEVICENAME, RIM_TYPEHID,
+    RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG,
-    PostQuitMessage, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, GIDC_ARRIVAL,
-    GIDC_REMOVAL, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GIDC_ARRIVAL, GIDC_REMOVAL, GetMessageW,
+    HWND_MESSAGE, MSG, PostQuitMessage, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_DESTROY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WNDCLASSW,
 };
 use windows::core::{Error, Result, w};
 
 const TRIGGER_COOLDOWN: Duration = Duration::from_millis(500);
 const RAW_GUIDE_TRIGGER_REPORT: [u8; 16] = [
-    0x00, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
-    0x00,
+    0x00, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 const HID_USAGE_PAGE_GENERIC_DESKTOP: u16 = 0x01;
 const HID_USAGE_GAMEPAD: u16 = 0x05;
@@ -61,6 +66,13 @@ struct AppConfig {
     capture_enabled: bool,
     debug_logging: bool,
     language: Language,
+    pause_game_on_trigger: bool,
+    focus_enabled: bool,
+    focus_locked: bool,
+    focus_diameter: u8,
+    focus_opacity: u8,
+    focus_x: f32,
+    focus_y: f32,
 }
 
 impl Default for AppConfig {
@@ -70,6 +82,13 @@ impl Default for AppConfig {
             capture_enabled: true,
             debug_logging: false,
             language: Language::English,
+            pause_game_on_trigger: false,
+            focus_enabled: false,
+            focus_locked: false,
+            focus_diameter: 16,
+            focus_opacity: 190,
+            focus_x: 0.5,
+            focus_y: 0.5,
         }
     }
 }
@@ -208,6 +227,7 @@ struct AppState {
     status: String,
     logs: String,
     connected_devices: Vec<String>,
+    bound_process: Option<process::BoundProcess>,
 }
 
 impl AppState {
@@ -224,6 +244,7 @@ impl AppState {
             status,
             logs: String::new(),
             connected_devices: Vec::new(),
+            bound_process: None,
         }
     }
 }
@@ -235,13 +256,59 @@ struct MapperApp {
     selected_preset: usize,
     language: Language,
     debug_window_open: bool,
+    pause_game_on_trigger: bool,
+    process_picker_open: bool,
+    processes: Vec<process::BoundProcess>,
+    process_filter: String,
+    icon: egui::TextureHandle,
+    _desktop: Option<desktop::Desktop>,
+    titlebar: Option<titlebar::Titlebar>,
+    #[cfg(debug_assertions)]
+    snapshot_frames: u32,
 }
 
 impl MapperApp {
-    fn new() -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let state = app_state().lock().expect("app state mutex poisoned");
         let config = state.config.clone();
         drop(state);
+
+        let icon_data = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+            .expect("embedded icon");
+        let icon = cc.egui_ctx.load_texture(
+            "app_icon",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [icon_data.width as usize, icon_data.height as usize],
+                &icon_data.rgba,
+            ),
+            egui::TextureOptions::NEAREST,
+        );
+        let titlebar = match cc.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(handle)) => {
+                match titlebar::Titlebar::install(HWND(handle.hwnd.get() as *mut _)) {
+                    Ok(titlebar) => Some(titlebar),
+                    Err(error) => {
+                        set_status(&format!("Titlebar: {error}"));
+                        cc.egui_ctx
+                            .send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let desktop = match cc.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(handle)) => {
+                match desktop::Desktop::start(handle.hwnd.get(), cc.egui_ctx.clone()) {
+                    Ok(desktop) => Some(desktop),
+                    Err(error) => {
+                        set_status(&format!("Tray / focus ring unavailable: {error}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
 
         Self {
             selected_preset: preset_index(&config.mapping_text).unwrap_or(0),
@@ -250,6 +317,15 @@ impl MapperApp {
             debug_logging: config.debug_logging,
             language: config.language,
             debug_window_open: config.debug_logging,
+            pause_game_on_trigger: config.pause_game_on_trigger,
+            process_picker_open: false,
+            processes: Vec::new(),
+            process_filter: String::new(),
+            icon,
+            _desktop: desktop,
+            titlebar,
+            #[cfg(debug_assertions)]
+            snapshot_frames: 0,
         }
     }
 
@@ -267,6 +343,12 @@ impl MapperApp {
             capture_enabled: self.capture_enabled,
             debug_logging: self.debug_logging,
             language: self.language,
+            pause_game_on_trigger: self.pause_game_on_trigger,
+            ..app_state()
+                .lock()
+                .expect("app state mutex poisoned")
+                .config
+                .clone()
         };
 
         {
@@ -277,7 +359,11 @@ impl MapperApp {
                 "{}: {} {}, {} {}",
                 text.status_saved_prefix,
                 text.capture,
-                if config.capture_enabled { text.enabled } else { text.disabled },
+                if config.capture_enabled {
+                    text.enabled
+                } else {
+                    text.disabled
+                },
                 text.mapping,
                 config.mapping_text
             );
@@ -299,8 +385,371 @@ impl MapperApp {
     }
 }
 
+fn game_text(language: Language, english: &'static str, chinese: &'static str) -> &'static str {
+    match language {
+        Language::English => english,
+        Language::Chinese => chinese,
+    }
+}
+
+fn report_process_error(language: Language, error: Error) {
+    let message = format!(
+        "{}: {error}",
+        game_text(language, "Process operation failed", "进程操作失败")
+    );
+    set_status(&message);
+    push_log_force(&message);
+}
+
+impl MapperApp {
+    fn focus_controls(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
+        theme::heading(ui, "03", game_text(language, "Focus ring", "防晕眩圆点"));
+        ui.label(
+            RichText::new(game_text(
+                language,
+                "A steady reference point for your game.",
+                "为游戏画面提供一个稳定的视觉参考点。",
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
+        let (mut config, available) = {
+            let state = app_state().lock().unwrap();
+            (
+                state.config.clone(),
+                state
+                    .bound_process
+                    .as_ref()
+                    .is_some_and(|p| !p.paused && !p.exited()),
+            )
+        };
+        let mut changed = ui
+            .checkbox(
+                &mut config.focus_enabled,
+                game_text(language, "Enable focus ring", "启用防晕眩圆点"),
+            )
+            .changed();
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 94.0), Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, theme::BG);
+        let center = rect.center();
+        for x in (0..(rect.width() as i32)).step_by(16) {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left() + x as f32, rect.top()),
+                    egui::pos2(rect.left() + x as f32, rect.bottom()),
+                ],
+                egui::Stroke::new(0.5, theme::EDGE),
+            );
+        }
+        for y in (0..94).step_by(16) {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), rect.top() + y as f32),
+                    egui::pos2(rect.right(), rect.top() + y as f32),
+                ],
+                egui::Stroke::new(0.5, theme::EDGE),
+            );
+        }
+        ui.painter().circle_stroke(
+            center,
+            config.focus_diameter as f32 / 2.0,
+            egui::Stroke::new(3.0, Color32::from_white_alpha(config.focus_opacity)),
+        );
+        ui.label(
+            RichText::new(game_text(
+                language,
+                "TRANSPARENT CENTER / PREVIEW",
+                "中心透明 / 效果预览",
+            ))
+            .small()
+            .monospace()
+            .color(theme::MUTED),
+        );
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut config.focus_diameter, 8..=36)
+                    .text(game_text(language, "Size", "大小")),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut config.focus_opacity, 50..=255).text(game_text(
+                    language,
+                    "Opacity",
+                    "不透明度",
+                )),
+            )
+            .changed();
+        ui.horizontal(|ui| {
+            let label = if config.focus_locked {
+                game_text(language, "Unlock position", "解锁位置")
+            } else {
+                game_text(language, "Lock position", "锁定位置")
+            };
+            if ui.button(label).clicked() {
+                config.focus_locked = !config.focus_locked;
+                changed = true;
+            }
+            if ui
+                .button(game_text(language, "Center", "回到中心"))
+                .clicked()
+            {
+                config.focus_x = 0.5;
+                config.focus_y = 0.5;
+                changed = true;
+            }
+        });
+        ui.label(
+            RichText::new(if config.focus_locked {
+                game_text(
+                    language,
+                    "LOCKED / Mouse clicks pass through to the game.",
+                    "已锁定 / 鼠标点击穿透到游戏。",
+                )
+            } else {
+                game_text(
+                    language,
+                    "UNLOCKED / Drag the white rim to move it.",
+                    "已解锁 / 按住白色圆环边缘拖动位置。",
+                )
+            })
+            .small()
+            .color(theme::MINT),
+        );
+        ui.label(
+            RichText::new(if available {
+                game_text(
+                    language,
+                    "Appears over the game while it is running.",
+                    "游戏运行时显示，暂停或退出时自动隐藏。",
+                )
+            } else {
+                game_text(
+                    language,
+                    "Waiting for a bound, running game.",
+                    "等待绑定并运行游戏。",
+                )
+            })
+            .small()
+            .color(theme::MUTED),
+        );
+        ui.label(
+            RichText::new(game_text(
+                language,
+                "Changes apply now. Save to keep them.",
+                "调整即时生效，点击保存配置以保留。",
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
+        if changed {
+            let mut state = app_state().lock().unwrap();
+            state.config.focus_enabled = config.focus_enabled;
+            state.config.focus_locked = config.focus_locked;
+            state.config.focus_diameter = config.focus_diameter;
+            state.config.focus_opacity = config.focus_opacity;
+            state.config.focus_x = config.focus_x;
+            state.config.focus_y = config.focus_y;
+        }
+    }
+
+    fn refresh_processes(&mut self) {
+        match process::enumerate() {
+            Ok(processes) => self.processes = processes,
+            Err(error) => report_process_error(self.language, error),
+        }
+    }
+
+    fn game_controls(&mut self, ui: &mut egui::Ui) {
+        let language = self.language;
+        ui.vertical(|ui| {
+            theme::heading(ui, "02", game_text(language, "Game process", "游戏进程"));
+            let (label, paused) = {
+                let mut state = app_state().lock().expect("app state mutex poisoned");
+                if state.bound_process.as_ref().is_some_and(|p| p.exited()) {
+                    state.bound_process = None;
+                    state.status = game_text(
+                        language,
+                        "Bound game exited; select a process again",
+                        "绑定的游戏已退出，请重新选择进程",
+                    )
+                    .into();
+                }
+                match &state.bound_process {
+                    Some(p) => (
+                        format!(
+                            "{} (PID {}) — {}",
+                            p.name,
+                            p.pid,
+                            if p.paused {
+                                game_text(language, "Paused", "已暂停")
+                            } else {
+                                game_text(language, "Running", "运行中")
+                            }
+                        ),
+                        p.paused,
+                    ),
+                    None => (
+                        game_text(language, "No process bound", "未绑定进程").into(),
+                        false,
+                    ),
+                }
+            };
+            ui.label(label);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(game_text(language, "Select process", "选择进程"))
+                    .clicked()
+                {
+                    self.refresh_processes();
+                    self.process_picker_open = true;
+                }
+                if ui
+                    .add_enabled(
+                        paused,
+                        egui::Button::new(game_text(language, "Resume game", "恢复游戏")),
+                    )
+                    .clicked()
+                {
+                    let result = {
+                        let mut state = app_state().lock().expect("app state mutex poisoned");
+                        state.bound_process.as_mut().map(|p| p.resume()).transpose()
+                    };
+                    match result {
+                        Ok(_) => set_status(game_text(language, "Game resumed", "游戏已恢复")),
+                        Err(error) => report_process_error(language, error),
+                    }
+                }
+                if ui
+                    .button(game_text(language, "Unbind", "解除绑定"))
+                    .clicked()
+                {
+                    let result = {
+                        let mut state = app_state().lock().expect("app state mutex poisoned");
+                        let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                        if result.is_ok() {
+                            state.bound_process = None;
+                        }
+                        result
+                    };
+                    if let Err(error) = result {
+                        report_process_error(language, error);
+                    }
+                }
+            });
+            ui.checkbox(
+                &mut self.pause_game_on_trigger,
+                game_text(
+                    language,
+                    "Pause bound game on Xbox button (Save to apply)",
+                    "按 Xbox 键时暂停绑定游戏（保存后生效）",
+                ),
+            );
+        });
+    }
+
+    fn process_picker(&mut self, ctx: &egui::Context) {
+        if !self.process_picker_open {
+            return;
+        }
+        let language = self.language;
+        let mut open = self.process_picker_open;
+        let mut selected = None;
+        egui::Window::new(game_text(language, "Select game process", "选择游戏进程"))
+            .id(egui::Id::new("process_picker"))
+            .open(&mut open)
+            .default_size(vec2(560.0, 320.0))
+            .show(ctx, |ui| {
+                ui.label(game_text(
+                    language,
+                    "Select the game's executable. Only accessible processes are listed.",
+                    "请选择游戏的可执行进程，仅列出当前有权限控制的进程。",
+                ));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.process_filter).hint_text(game_text(
+                            language,
+                            "Filter by name or PID",
+                            "按名称或 PID 筛选",
+                        )),
+                    );
+                    if ui.button(game_text(language, "Refresh", "刷新")).clicked() {
+                        self.refresh_processes();
+                    }
+                });
+                let filter = self.process_filter.trim().to_lowercase();
+                ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    for (index, process) in self.processes.iter().enumerate() {
+                        let label = format!("{} (PID {})", process.name, process.pid);
+                        if !process.exited()
+                            && label.to_lowercase().contains(&filter)
+                            && ui.selectable_label(false, label).clicked()
+                        {
+                            selected = Some(index);
+                        }
+                    }
+                });
+            });
+        if let Some(index) = selected {
+            let result = {
+                let mut state = app_state().lock().expect("app state mutex poisoned");
+                let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                if result.is_ok() {
+                    state.bound_process = Some(self.processes.remove(index));
+                    state.status =
+                        game_text(language, "Game process bound", "游戏进程已绑定").into();
+                }
+                result
+            };
+            match result {
+                Ok(_) => open = false,
+                Err(error) => report_process_error(language, error),
+            }
+        }
+        self.process_picker_open = open;
+        if !open {
+            self.processes.clear();
+        }
+    }
+}
+
 impl eframe::App for MapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(debug_assertions)]
+        if let Ok(path) = env::var("SLACKINPUT_UI_SNAPSHOT") {
+            use eframe::icon_data::IconDataExt;
+            self.snapshot_frames += 1;
+            if self.snapshot_frames == 8 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            }
+            for event in ctx.input(|input| input.events.clone()) {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    let icon = egui::IconData {
+                        width: image.width() as u32,
+                        height: image.height() as u32,
+                        rgba: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+                    };
+                    fs::write(&path, icon.to_png_bytes().expect("encode UI snapshot"))
+                        .expect("save UI snapshot");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        if ctx.input(|input| input.viewport().close_requested()) {
+            let result = {
+                let mut state = app_state().lock().expect("app state mutex poisoned");
+                let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                if result.is_ok() {
+                    state.config.capture_enabled = false;
+                }
+                result
+            };
+            if let Err(error) = result {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                report_process_error(self.language, error);
+            }
+        }
         let (status, logs, connected_devices) = {
             let state = app_state().lock().expect("app state mutex poisoned");
             (
@@ -312,96 +761,198 @@ impl eframe::App for MapperApp {
         let text = tr(self.language);
         let was_debug_window_open = self.debug_window_open;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(text.title);
-            ui.group(|ui| {
-                ui.label(RichText::new(text.controller).strong());
-                let is_active = !connected_devices.is_empty();
-                let indicator_color = if is_active {
-                    Color32::from_rgb(46, 204, 113)
-                } else {
-                    Color32::from_rgb(231, 76, 60)
-                };
-                let indicator_text = if is_active { text.active } else { text.inactive };
-
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 5.0, indicator_color);
-                    ui.label(RichText::new(indicator_text).strong().color(indicator_color));
-                });
-            });
-            ui.add_space(6.0);
-
-            ui.horizontal(|ui| {
-                ui.label(text.preset);
-                egui::ComboBox::from_id_salt("preset_combo")
-                    .selected_text(PRESETS[self.selected_preset])
-                    .show_ui(ui, |ui| {
-                        for (index, preset) in PRESETS.iter().enumerate() {
-                            if ui
-                                .selectable_value(&mut self.selected_preset, index, *preset)
-                                .clicked()
-                            {
-                                self.mapping_input = (*preset).to_string();
-                            }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::same(22))
+                    .stroke(egui::Stroke::new(2.0, theme::EDGE)),
+            )
+            .show(ctx, |ui| {
+                let mut controls_left = ui.max_rect().right();
+                let header = ui.horizontal(|ui| {
+                    ui.image((self.icon.id(), vec2(58.0, 58.0)))
+                        .on_hover_text(text.title);
+                    ui.vertical(|ui| {
+                        ui.add(egui::Label::new(
+                            RichText::new("SLACK INPUT")
+                                .monospace()
+                                .size(27.0)
+                                .strong()
+                                .color(theme::MINT),
+                        ));
+                        ui.label(
+                            RichText::new(game_text(
+                                self.language,
+                                "GAME COMPANION  /  READY WHEN YOU ARE",
+                                "游戏助手  /  随时切换，安心继续",
+                            ))
+                            .small()
+                            .color(theme::MUTED),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .button("X")
+                            .on_hover_text(game_text(self.language, "Exit", "退出"))
+                            .clicked()
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let minimize = ui.button("_").on_hover_text(game_text(
+                            self.language,
+                            "Minimize to tray",
+                            "最小化到托盘",
+                        ));
+                        controls_left = minimize.rect.left();
+                        if minimize.clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                     });
-            });
-
-            ui.add_space(4.0);
-            ui.label(text.mapping);
-            ui.add(
-                TextEdit::singleline(&mut self.mapping_input)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(text.mapping_hint),
-            );
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.capture_enabled, text.capture);
-                if ui.button(text.debug).clicked() {
-                    self.debug_window_open = true;
-                    self.debug_logging = true;
-                    app_state()
-                        .lock()
-                        .expect("app state mutex poisoned")
-                        .config
-                        .debug_logging = true;
+                });
+                if let Some(titlebar) = &self.titlebar {
+                    titlebar.update(
+                        egui::Rect::from_min_max(
+                            egui::Pos2::ZERO,
+                            egui::pos2(controls_left - 8.0, header.response.rect.bottom() + 8.0),
+                        ),
+                        ctx.pixels_per_point(),
+                    );
                 }
-            });
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(text.language);
-                egui::ComboBox::from_id_salt("language_combo")
-                    .selected_text(match self.language {
-                        Language::English => text.english,
-                        Language::Chinese => text.chinese,
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.language, Language::English, text.english);
-                        ui.selectable_value(&mut self.language, Language::Chinese, text.chinese);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let active = !connected_devices.is_empty();
+                    ui.label(
+                        RichText::new(if active { "■" } else { "□" }).color(if active {
+                            theme::MINT
+                        } else {
+                            theme::GOLD
+                        }),
+                    );
+                    ui.label(format!(
+                        "{} / {}",
+                        text.controller,
+                        if active { text.active } else { text.inactive }
+                    ));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        egui::ComboBox::from_id_salt("language_combo")
+                            .width(100.0)
+                            .selected_text(if self.language == Language::English {
+                                text.english
+                            } else {
+                                text.chinese
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.language,
+                                    Language::English,
+                                    text.english,
+                                );
+                                ui.selectable_value(
+                                    &mut self.language,
+                                    Language::Chinese,
+                                    text.chinese,
+                                );
+                            })
+                            .response
+                            .on_hover_text(text.language);
                     });
+                });
+                ui.add_space(10.0);
+                ScrollArea::vertical()
+                    .max_height((ui.available_height() - 102.0).max(260.0))
+                    .show(ui, |ui| {
+                        ui.columns(2, |columns| {
+                            theme::card().show(&mut columns[0], |ui| {
+                                ui.set_width(ui.available_width());
+                                theme::heading(ui, "01", text.mapping);
+                                ui.label(RichText::new(text.preset).color(theme::MUTED));
+                                egui::ComboBox::from_id_salt("preset_combo")
+                                    .width(ui.available_width())
+                                    .selected_text(PRESETS[self.selected_preset])
+                                    .show_ui(ui, |ui| {
+                                        for (index, preset) in PRESETS.iter().enumerate() {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut self.selected_preset,
+                                                    index,
+                                                    *preset,
+                                                )
+                                                .clicked()
+                                            {
+                                                self.mapping_input = (*preset).to_string();
+                                            }
+                                        }
+                                    });
+                                ui.add(
+                                    TextEdit::singleline(&mut self.mapping_input)
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                ui.label(
+                                    RichText::new(text.mapping_hint).small().color(theme::MUTED),
+                                );
+                                ui.checkbox(&mut self.capture_enabled, text.capture);
+                            });
+                            columns[0].add_space(12.0);
+                            theme::card().show(&mut columns[0], |ui| {
+                                ui.set_width(ui.available_width());
+                                self.game_controls(ui);
+                            });
+                            theme::card().show(&mut columns[1], |ui| {
+                                ui.set_width(ui.available_width());
+                                self.focus_controls(ui);
+                            });
+                        });
+                    });
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(text.save).strong().color(theme::BG))
+                                .fill(theme::MINT),
+                        )
+                        .clicked()
+                    {
+                        self.apply_changes();
+                    }
+                    if ui.button(text.reset).clicked() {
+                        self.selected_preset = 0;
+                        self.mapping_input = PRESETS[0].to_string();
+                        self.capture_enabled = true;
+                        self.debug_logging = false;
+                        self.pause_game_on_trigger = false;
+                        self.language = Language::English;
+                        {
+                            let mut state = app_state().lock().unwrap();
+                            state.config = AppConfig::default();
+                        }
+                        self.apply_changes();
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button(text.debug).clicked() {
+                            self.debug_window_open = true;
+                            self.debug_logging = true;
+                            app_state().lock().unwrap().config.debug_logging = true;
+                        }
+                        ui.label(
+                            RichText::new(game_text(
+                                self.language,
+                                "MINIMIZE → TRAY",
+                                "最小化 → 系统托盘",
+                            ))
+                            .monospace()
+                            .small()
+                            .color(theme::MUTED),
+                        );
+                    });
+                });
+                ui.add_space(2.0);
+                ui.label(RichText::new(status).small().color(theme::MUTED));
             });
 
-            ui.add_space(4.0);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                if ui.button(text.save).clicked() {
-                    self.apply_changes();
-                }
-                if ui.button(text.reset).clicked() {
-                    self.selected_preset = 0;
-                    self.mapping_input = PRESETS[0].to_string();
-                    self.capture_enabled = true;
-                    self.debug_logging = false;
-                    self.language = Language::English;
-                    self.apply_changes();
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.label(RichText::new(status).strong());
-        });
+        self.process_picker(ctx);
 
         if self.debug_window_open {
             egui::Window::new(text.logs)
@@ -412,9 +963,7 @@ impl eframe::App for MapperApp {
                 .default_size(vec2(680.0, 360.0))
                 .show(ctx, |ui| {
                     ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(logs.as_str()).monospace()).wrap(),
-                        );
+                        ui.add(egui::Label::new(RichText::new(logs.as_str()).monospace()).wrap());
                     });
                 });
         }
@@ -443,6 +992,15 @@ const PRESETS: [&str; 6] = [
 
 fn main() -> Result<()> {
     let mut config = load_config();
+    #[cfg(debug_assertions)]
+    if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
+        config.capture_enabled = false;
+        config.language = env::var("SLACKINPUT_UI_LANGUAGE")
+            .ok()
+            .as_deref()
+            .and_then(Language::from_config_value)
+            .unwrap_or(Language::Chinese);
+    }
     if env::args().any(|arg| arg == "--debug") {
         config.debug_logging = true;
     }
@@ -456,9 +1014,14 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([620.0, 300.0])
-            .with_min_inner_size([620.0, 300.0])
-            .with_resizable(false)
+            .with_inner_size([960.0, 760.0])
+            .with_min_inner_size([900.0, 720.0])
+            .with_resizable(true)
+            .with_decorations(false)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("embedded icon"),
+            )
             .with_maximize_button(false)
             .with_title("SlackInput"),
         ..Default::default()
@@ -469,9 +1032,22 @@ fn main() -> Result<()> {
         native_options,
         Box::new(|cc| {
             configure_egui_fonts(&cc.egui_ctx);
-            Ok(Box::new(MapperApp::new()))
+            theme::install(&cc.egui_ctx);
+            Ok(Box::new(MapperApp::new(cc)))
         }),
     );
+
+    // The global state is not dropped on exit. Explicitly release its binding.
+    {
+        let mut state = app_state().lock().expect("app state mutex poisoned");
+        state.config.capture_enabled = false;
+        if let Some(mut process) = state.bound_process.take() {
+            if let Err(error) = process.resume() {
+                drop(state);
+                push_log_force(&format!("Resume on exit failed: {error}"));
+            }
+        }
+    }
 
     if let Err(error) = result {
         return Err(Error::new(
@@ -494,10 +1070,9 @@ fn configure_egui_fonts(ctx: &egui::Context) {
     };
 
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(
-        font_name.clone(),
-        FontData::from_owned(font_bytes).into(),
-    );
+    fonts
+        .font_data
+        .insert(font_name.clone(), FontData::from_owned(font_bytes).into());
     fonts
         .families
         .entry(FontFamily::Proportional)
@@ -759,8 +1334,28 @@ fn trigger_mapping(device_name: &str) -> Result<()> {
     let label = mapping_label();
     let text = tr(current_language());
     set_status(&format!("{} {}", text.triggered_prefix, label));
-    push_log_if_debug(&format!("{}: {} -> {}", text.trigger_log_prefix, device_name, label));
-    send_hotkey(&mapping)
+    push_log_if_debug(&format!(
+        "{}: {} -> {}",
+        text.trigger_log_prefix, device_name, label
+    ));
+    let hotkey_result = send_hotkey(&mapping);
+    // Suspension failure must not suppress the configured shortcut.
+    let pause_result = {
+        let mut state = app_state().lock().expect("app state mutex poisoned");
+        if state.config.capture_enabled && state.config.pause_game_on_trigger {
+            state
+                .bound_process
+                .as_mut()
+                .map(|process| process.suspend())
+                .transpose()
+        } else {
+            Ok(None)
+        }
+    };
+    if let Err(error) = pause_result {
+        report_process_error(current_language(), error);
+    }
+    hotkey_result
 }
 
 fn send_hotkey(keys: &[VIRTUAL_KEY]) -> Result<()> {
@@ -914,10 +1509,7 @@ fn current_language() -> Language {
 }
 
 fn set_status(text: &str) {
-    app_state()
-        .lock()
-        .expect("app state mutex poisoned")
-        .status = text.to_string();
+    app_state().lock().expect("app state mutex poisoned").status = text.to_string();
 }
 
 fn refresh_connected_devices() -> Result<()> {
@@ -931,7 +1523,11 @@ fn refresh_connected_devices() -> Result<()> {
 
 fn remember_connected_device(device_name: &str) {
     let mut state = app_state().lock().expect("app state mutex poisoned");
-    if !state.connected_devices.iter().any(|name| name == device_name) {
+    if !state
+        .connected_devices
+        .iter()
+        .any(|name| name == device_name)
+    {
         state.connected_devices.push(device_name.to_string());
     }
 }
@@ -992,6 +1588,10 @@ fn load_config() -> AppConfig {
         None => return AppConfig::default(),
     };
 
+    parse_config(&contents)
+}
+
+fn parse_config(contents: &str) -> AppConfig {
     let mut config = AppConfig::default();
     for line in contents.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -1001,6 +1601,19 @@ fn load_config() -> AppConfig {
             "mapping" => config.mapping_text = value.trim().to_string(),
             "capture_enabled" => config.capture_enabled = value.trim().eq_ignore_ascii_case("true"),
             "debug_logging" => config.debug_logging = value.trim().eq_ignore_ascii_case("true"),
+            "pause_game_on_trigger" => {
+                config.pause_game_on_trigger = value.trim().eq_ignore_ascii_case("true")
+            }
+            "focus_enabled" => config.focus_enabled = value.trim().eq_ignore_ascii_case("true"),
+            "focus_locked" => config.focus_locked = value.trim().eq_ignore_ascii_case("true"),
+            "focus_diameter" => {
+                config.focus_diameter = value.trim().parse::<u8>().unwrap_or(16).clamp(8, 36)
+            }
+            "focus_opacity" => {
+                config.focus_opacity = value.trim().parse::<u8>().unwrap_or(190).clamp(50, 255)
+            }
+            "focus_x" => config.focus_x = parse_focus_position(value),
+            "focus_y" => config.focus_y = parse_focus_position(value),
             "language" => {
                 if let Some(language) = Language::from_config_value(value) {
                     config.language = language;
@@ -1027,19 +1640,87 @@ fn save_config(config: &AppConfig) -> Result<()> {
             )
         })?;
     }
-    let body = format!(
-        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\n",
-        config.mapping_text,
-        config.capture_enabled,
-        config.debug_logging,
-        config.language.config_value()
-    );
-    fs::write(config_path(), body).map_err(|error| {
+    fs::write(config_path(), config_body(config)).map_err(|error| {
         Error::new(
             windows::core::HRESULT(0x80070020u32 as i32),
             format!("保存配置失败: {error}"),
         )
     })
+}
+
+fn config_body(config: &AppConfig) -> String {
+    format!(
+        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\npause_game_on_trigger={}\nfocus_enabled={}\nfocus_locked={}\nfocus_diameter={}\nfocus_opacity={}\nfocus_x={}\nfocus_y={}\n",
+        config.mapping_text,
+        config.capture_enabled,
+        config.debug_logging,
+        config.language.config_value(),
+        config.pause_game_on_trigger,
+        config.focus_enabled,
+        config.focus_locked,
+        config.focus_diameter,
+        config.focus_opacity,
+        config.focus_x,
+        config.focus_y
+    )
+}
+
+fn parse_focus_position(value: &str) -> f32 {
+    value
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn old_configs_keep_game_pause_disabled() {
+        assert!(!AppConfig::default().pause_game_on_trigger);
+        assert!(!parse_config("mapping=Alt+Tab\ncapture_enabled=true\n").pause_game_on_trigger);
+    }
+
+    #[test]
+    fn pause_setting_round_trips() {
+        for enabled in [false, true] {
+            let config = AppConfig {
+                pause_game_on_trigger: enabled,
+                ..Default::default()
+            };
+            assert_eq!(
+                parse_config(&config_body(&config)).pause_game_on_trigger,
+                enabled
+            );
+        }
+    }
+
+    #[test]
+    fn focus_settings_round_trip_and_invalid_positions_are_safe() {
+        let config = AppConfig {
+            focus_enabled: true,
+            focus_locked: true,
+            focus_diameter: 24,
+            focus_opacity: 128,
+            focus_x: 0.2,
+            focus_y: 0.8,
+            ..Default::default()
+        };
+        let loaded = parse_config(&config_body(&config));
+        assert!(loaded.focus_enabled && loaded.focus_locked);
+        assert_eq!((loaded.focus_diameter, loaded.focus_opacity), (24, 128));
+        assert_eq!((loaded.focus_x, loaded.focus_y), (0.2, 0.8));
+        for value in ["NaN", "inf", "-inf", "invalid"] {
+            assert_eq!(parse_focus_position(value), 0.5);
+        }
+        assert_eq!(parse_focus_position("-9"), 0.0);
+        assert_eq!(parse_focus_position("2"), 1.0);
+        assert!(!parse_config("mapping=Alt+Tab").focus_enabled);
+    }
 }
 
 fn next_hid_event(device_key: isize) -> u64 {
@@ -1110,7 +1791,12 @@ fn is_matching_controller(info: RID_DEVICE_INFO_HID) -> bool {
 fn raw_device_name(device: HANDLE) -> Result<String> {
     let key = device.0 as isize;
     let cache = HID_NAMES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(name) = cache.lock().expect("hid name mutex poisoned").get(&key).cloned() {
+    if let Some(name) = cache
+        .lock()
+        .expect("hid name mutex poisoned")
+        .get(&key)
+        .cloned()
+    {
         return Ok(name);
     }
 
@@ -1135,7 +1821,10 @@ fn raw_device_name(device: HANDLE) -> Result<String> {
         }
     }
 
-    let nul = buffer.iter().position(|&ch| ch == 0).unwrap_or(buffer.len());
+    let nul = buffer
+        .iter()
+        .position(|&ch| ch == 0)
+        .unwrap_or(buffer.len());
     let name = String::from_utf16_lossy(&buffer[..nul]);
     cache
         .lock()
