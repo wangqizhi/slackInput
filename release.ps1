@@ -7,7 +7,7 @@
     3. Generates a changelog from git commits since the last tag
     4. Creates a GitHub release via `gh release create`
 .PARAMETER TagName
-    The tag/version to create (e.g. v0.2.0). If omitted, auto-generates from Cargo.toml version.
+    The tag/version to create (e.g. v0.3.0). If omitted, auto-generates from Cargo.toml version.
 .PARAMETER Draft
     Create the release as a draft.
 .PARAMETER NotesOnly

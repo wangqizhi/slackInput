@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod desktop;
+mod marker;
 mod process;
 mod theme;
 mod titlebar;
@@ -48,6 +49,10 @@ const HID_USAGE_PAGE_GENERIC_DESKTOP: u16 = 0x01;
 const HID_USAGE_GAMEPAD: u16 = 0x05;
 const HID_USAGE_JOYSTICK: u16 = 0x04;
 const MAX_LOG_CHARS: usize = 32_000;
+/// Floating egui windows whose rects must be excluded from the native caption
+/// strip, or the WM_NCHITTEST subclass would swallow their close-button clicks.
+const PROCESS_PICKER_WINDOW_ID: &str = "process_picker";
+const DEBUG_LOG_WINDOW_ID: &str = "debug_log_window";
 const CANDIDATE_CJK_FONTS: [&str; 4] = [
     "C:\\Windows\\Fonts\\simhei.ttf",
     "C:\\Windows\\Fonts\\Deng.ttf",
@@ -70,6 +75,7 @@ struct AppConfig {
     focus_enabled: bool,
     focus_locked: bool,
     focus_diameter: u8,
+    focus_style: marker::Style,
     focus_opacity: u8,
     focus_x: f32,
     focus_y: f32,
@@ -86,6 +92,7 @@ impl Default for AppConfig {
             focus_enabled: false,
             focus_locked: false,
             focus_diameter: 16,
+            focus_style: marker::Style::Ring,
             focus_opacity: 190,
             focus_x: 0.5,
             focus_y: 0.5,
@@ -430,9 +437,21 @@ impl MapperApp {
                 game_text(language, "Enable focus ring", "启用防晕眩圆点"),
             )
             .changed();
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 94.0), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 94.0), Sense::click_and_drag());
+        if !config.focus_locked && (response.dragged() || response.clicked()) {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                config.focus_x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                config.focus_y = ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                changed = true;
+            }
+        }
         ui.painter().rect_filled(rect, 0.0, theme::BG);
-        let center = rect.center();
+        let center = rect.min
+            + vec2(
+                rect.width() * config.focus_x,
+                rect.height() * config.focus_y,
+            );
         for x in (0..(rect.width() as i32)).step_by(16) {
             ui.painter().line_segment(
                 [
@@ -451,16 +470,45 @@ impl MapperApp {
                 egui::Stroke::new(0.5, theme::EDGE),
             );
         }
-        ui.painter().circle_stroke(
-            center,
-            config.focus_diameter as f32 / 2.0,
-            egui::Stroke::new(3.0, Color32::from_white_alpha(config.focus_opacity)),
-        );
+        let origin = center
+            - vec2(
+                config.focus_diameter as f32 / 2.0,
+                config.focus_diameter as f32 / 2.0,
+            );
+        let painter = ui.painter().with_clip_rect(rect);
+        for (x, y, length) in marker::spans(config.focus_diameter, config.focus_style) {
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    origin + vec2(x as f32, y as f32),
+                    vec2(length as f32, 1.0),
+                ),
+                0.0,
+                Color32::from_white_alpha(config.focus_opacity),
+            );
+        }
+        let style_label = |style| match style {
+            marker::Style::Ring => game_text(language, "Hollow", "空心"),
+            marker::Style::Solid => game_text(language, "Solid", "实心"),
+            marker::Style::Crosshair => game_text(language, "Crosshair", "十字瞄准"),
+            marker::Style::X => game_text(language, "X", "叉形"),
+        };
+        ui.horizontal(|ui| {
+            ui.label(game_text(language, "Style", "内部样式"));
+            egui::ComboBox::from_id_salt("focus_style")
+                .selected_text(style_label(config.focus_style))
+                .show_ui(ui, |ui| {
+                    for style in marker::Style::ALL {
+                        changed |= ui
+                            .selectable_value(&mut config.focus_style, style, style_label(style))
+                            .changed();
+                    }
+                });
+        });
         ui.label(
             RichText::new(game_text(
                 language,
-                "TRANSPARENT CENTER / PREVIEW",
-                "中心透明 / 效果预览",
+                "DRAG IN PREVIEW TO POSITION",
+                "解锁后可在预览区域拖动位置",
             ))
             .small()
             .monospace()
@@ -510,8 +558,8 @@ impl MapperApp {
             } else {
                 game_text(
                     language,
-                    "UNLOCKED / Drag the white rim to move it.",
-                    "已解锁 / 按住白色圆环边缘拖动位置。",
+                    "UNLOCKED / Drag the marker or its preview.",
+                    "已解锁 / 可拖动画面中的圆点或上方预览。",
                 )
             })
             .small()
@@ -548,6 +596,7 @@ impl MapperApp {
             state.config.focus_enabled = config.focus_enabled;
             state.config.focus_locked = config.focus_locked;
             state.config.focus_diameter = config.focus_diameter;
+            state.config.focus_style = config.focus_style;
             state.config.focus_opacity = config.focus_opacity;
             state.config.focus_x = config.focus_x;
             state.config.focus_y = config.focus_y;
@@ -565,7 +614,7 @@ impl MapperApp {
         let language = self.language;
         ui.vertical(|ui| {
             theme::heading(ui, "02", game_text(language, "Game process", "游戏进程"));
-            let (label, paused) = {
+            let (label, paused, bound) = {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
                 if state.bound_process.as_ref().is_some_and(|p| p.exited()) {
                     state.bound_process = None;
@@ -589,15 +638,17 @@ impl MapperApp {
                             }
                         ),
                         p.paused,
+                        true,
                     ),
                     None => (
                         game_text(language, "No process bound", "未绑定进程").into(),
+                        false,
                         false,
                     ),
                 }
             };
             ui.label(label);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .button(game_text(language, "Select process", "选择进程"))
                     .clicked()
@@ -607,11 +658,36 @@ impl MapperApp {
                 }
                 if ui
                     .add_enabled(
-                        paused,
-                        egui::Button::new(game_text(language, "Resume game", "恢复游戏")),
+                        bound && !paused,
+                        egui::Button::new(game_text(language, "Pause game", "中断游戏")),
                     )
                     .clicked()
                 {
+                    let result = app_state()
+                        .lock()
+                        .unwrap()
+                        .bound_process
+                        .as_mut()
+                        .map(|p| p.suspend())
+                        .transpose();
+                    match result {
+                        Ok(_) => set_status(game_text(language, "Game paused", "游戏已暂停")),
+                        Err(error) => report_process_error(language, error),
+                    }
+                }
+                let resume_label = game_text(language, "Resume game", "恢复游戏");
+                let resume_button = if paused {
+                    egui::Button::new(
+                        RichText::new(format!("▶  {resume_label}"))
+                            .strong()
+                            .color(theme::BG),
+                    )
+                    .fill(theme::MINT)
+                    .min_size(vec2(180.0, 44.0))
+                } else {
+                    egui::Button::new(resume_label)
+                };
+                if ui.add_enabled(paused, resume_button).clicked() {
                     let result = {
                         let mut state = app_state().lock().expect("app state mutex poisoned");
                         state.bound_process.as_mut().map(|p| p.resume()).transpose()
@@ -638,14 +714,20 @@ impl MapperApp {
                     }
                 }
             });
-            ui.checkbox(
-                &mut self.pause_game_on_trigger,
-                game_text(
-                    language,
-                    "Pause bound game on Xbox button (Save to apply)",
-                    "按 Xbox 键时暂停绑定游戏（保存后生效）",
-                ),
-            );
+            if ui
+                .checkbox(
+                    &mut self.pause_game_on_trigger,
+                    game_text(
+                        language,
+                        "Pause bound game on Xbox button (applies now)",
+                        "按 Xbox 键时暂停绑定游戏（即时生效）",
+                    ),
+                )
+                .changed()
+            {
+                app_state().lock().unwrap().config.pause_game_on_trigger =
+                    self.pause_game_on_trigger;
+            }
         });
     }
 
@@ -657,7 +739,7 @@ impl MapperApp {
         let mut open = self.process_picker_open;
         let mut selected = None;
         egui::Window::new(game_text(language, "Select game process", "选择游戏进程"))
-            .id(egui::Id::new("process_picker"))
+            .id(egui::Id::new(PROCESS_PICKER_WINDOW_ID))
             .open(&mut open)
             .default_size(vec2(560.0, 320.0))
             .show(ctx, |ui| {
@@ -811,11 +893,26 @@ impl eframe::App for MapperApp {
                     });
                 });
                 if let Some(titlebar) = &self.titlebar {
+                    // Floating egui windows drawn over the caption strip keep
+                    // client input there, or the native hit-test eats their
+                    // title bar and close-button clicks.
+                    let mut floating_windows = Vec::new();
+                    for (open, id) in [
+                        (self.process_picker_open, PROCESS_PICKER_WINDOW_ID),
+                        (self.debug_window_open, DEBUG_LOG_WINDOW_ID),
+                    ] {
+                        if let Some(rect) = open.then(|| {
+                            ctx.memory(|mem| mem.area_rect(egui::Id::new(id)))
+                        }).flatten() {
+                            floating_windows.push(rect);
+                        }
+                    }
                     titlebar.update(
                         egui::Rect::from_min_max(
                             egui::Pos2::ZERO,
                             egui::pos2(controls_left - 8.0, header.response.rect.bottom() + 8.0),
                         ),
+                        &floating_windows,
                         ctx.pixels_per_point(),
                     );
                 }
@@ -956,7 +1053,7 @@ impl eframe::App for MapperApp {
 
         if self.debug_window_open {
             egui::Window::new(text.logs)
-                .id(egui::Id::new("debug_log_window"))
+                .id(egui::Id::new(DEBUG_LOG_WINDOW_ID))
                 .open(&mut self.debug_window_open)
                 .resizable(true)
                 .vscroll(true)
@@ -1604,6 +1701,7 @@ fn parse_config(contents: &str) -> AppConfig {
             "pause_game_on_trigger" => {
                 config.pause_game_on_trigger = value.trim().eq_ignore_ascii_case("true")
             }
+            "focus_style" => config.focus_style = marker::Style::parse(value),
             "focus_enabled" => config.focus_enabled = value.trim().eq_ignore_ascii_case("true"),
             "focus_locked" => config.focus_locked = value.trim().eq_ignore_ascii_case("true"),
             "focus_diameter" => {
@@ -1650,7 +1748,7 @@ fn save_config(config: &AppConfig) -> Result<()> {
 
 fn config_body(config: &AppConfig) -> String {
     format!(
-        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\npause_game_on_trigger={}\nfocus_enabled={}\nfocus_locked={}\nfocus_diameter={}\nfocus_opacity={}\nfocus_x={}\nfocus_y={}\n",
+        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\npause_game_on_trigger={}\nfocus_enabled={}\nfocus_locked={}\nfocus_diameter={}\nfocus_opacity={}\nfocus_x={}\nfocus_y={}\nfocus_style={}\n",
         config.mapping_text,
         config.capture_enabled,
         config.debug_logging,
@@ -1661,7 +1759,8 @@ fn config_body(config: &AppConfig) -> String {
         config.focus_diameter,
         config.focus_opacity,
         config.focus_x,
-        config.focus_y
+        config.focus_y,
+        config.focus_style.key()
     )
 }
 
@@ -1701,6 +1800,18 @@ mod config_tests {
 
     #[test]
     fn focus_settings_round_trip_and_invalid_positions_are_safe() {
+        for style in marker::Style::ALL {
+            let config = AppConfig {
+                focus_style: style,
+                ..Default::default()
+            };
+            assert_eq!(parse_config(&config_body(&config)).focus_style, style);
+        }
+        assert_eq!(
+            parse_config("focus_style=unknown").focus_style,
+            marker::Style::Ring
+        );
+        assert_eq!(parse_config("").focus_style, marker::Style::Ring);
         let config = AppConfig {
             focus_enabled: true,
             focus_locked: true,

@@ -244,7 +244,8 @@ unsafe extern "system" fn ring_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let dc = unsafe { BeginPaint(hwnd, &mut ps) };
-            let diameter = app_state().lock().unwrap().config.focus_diameter as i32;
+            let config = app_state().lock().unwrap().config.clone();
+            let diameter = config.focus_diameter as i32;
             unsafe {
                 let background = CreateSolidBrush(TRANSPARENT);
                 let _ = FillRect(
@@ -258,14 +259,23 @@ unsafe extern "system" fn ring_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     background,
                 );
                 let _ = DeleteObject(background.into());
-                let brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-                let pen = CreatePen(PS_SOLID, 3, COLORREF(0x00ffffff));
-                let previous = SelectObject(dc, pen.into());
+                let brush = CreateSolidBrush(COLORREF(0x00ffffff));
                 let start = (RING_SIZE - diameter) / 2;
-                let _ = Ellipse(dc, start, start, start + diameter, start + diameter);
-                SelectObject(dc, previous);
-                SelectObject(dc, brush);
-                let _ = DeleteObject(pen.into());
+                for (x, y, length) in
+                    crate::marker::spans(config.focus_diameter, config.focus_style)
+                {
+                    let _ = FillRect(
+                        dc,
+                        &RECT {
+                            left: start + x,
+                            top: start + y,
+                            right: start + x + length,
+                            bottom: start + y + 1,
+                        },
+                        brush,
+                    );
+                }
+                let _ = DeleteObject(brush.into());
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
@@ -340,7 +350,7 @@ pub fn should_show(enabled: bool, bound: bool, paused: bool, exited: bool) -> bo
 
 fn update_ring(
     hwnd: HWND,
-    last: &mut Option<(i32, i32, bool, u8, u8)>,
+    last: &mut Option<(i32, i32, bool, u8, u8, crate::marker::Style)>,
     desktops: Option<&IVirtualDesktopManager>,
 ) {
     let (config, pid) = {
@@ -379,6 +389,7 @@ fn update_ring(
         config.focus_locked,
         config.focus_diameter,
         config.focus_opacity,
+        config.focus_style,
     );
     unsafe {
         if *last != Some(next) {
