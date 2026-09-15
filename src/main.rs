@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod desktop;
+mod keyboard;
 mod marker;
 mod process;
 mod theme;
@@ -67,11 +68,15 @@ static LAST_TRIGGER_AT: OnceLock<Mutex<Instant>> = OnceLock::new();
 
 #[derive(Clone)]
 struct AppConfig {
+    keyboard_trigger: String,
     mapping_text: String,
     capture_enabled: bool,
     debug_logging: bool,
     language: Language,
     pause_game_on_trigger: bool,
+    /// Executable name bound last time, used for ordering and automatic binding.
+    last_process: String,
+    auto_load_process: bool,
     focus_enabled: bool,
     focus_locked: bool,
     focus_diameter: u8,
@@ -84,11 +89,14 @@ struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            keyboard_trigger: String::new(),
             mapping_text: "Ctrl+Win+Left".to_string(),
             capture_enabled: true,
             debug_logging: false,
             language: Language::English,
             pause_game_on_trigger: false,
+            last_process: String::new(),
+            auto_load_process: true,
             focus_enabled: false,
             focus_locked: false,
             focus_diameter: 16,
@@ -155,6 +163,7 @@ struct I18n {
     capture_disabled_log: &'static str,
     config_updated_prefix: &'static str,
     font_missing_log: &'static str,
+    picker_order_hint: &'static str,
 }
 
 fn tr(language: Language) -> I18n {
@@ -191,6 +200,7 @@ fn tr(language: Language) -> I18n {
             capture_disabled_log: "Guide report detected, but input capture is disabled.",
             config_updated_prefix: "Config updated",
             font_missing_log: "No CJK font found. egui will keep using default fonts.",
+            picker_order_hint: "The last selected process is listed first.",
         },
         Language::Chinese => I18n {
             title: "SlackInput",
@@ -224,6 +234,7 @@ fn tr(language: Language) -> I18n {
             capture_disabled_log: "检测到 Guide 报告，但输入捕获当前已关闭。",
             config_updated_prefix: "配置已更新",
             font_missing_log: "未找到可用中文字体，egui 将继续使用默认字体。",
+            picker_order_hint: "上次选择的进程会显示在列表最前面。",
         },
     }
 }
@@ -257,6 +268,10 @@ impl AppState {
 }
 
 struct MapperApp {
+    shortcut_capture: Option<bool>,
+    captured_shortcut: Option<String>,
+    settings_tab: usize,
+    keyboard_trigger_input: String,
     mapping_input: String,
     capture_enabled: bool,
     debug_logging: bool,
@@ -317,7 +332,11 @@ impl MapperApp {
             _ => None,
         };
 
-        Self {
+        let mut app = Self {
+            shortcut_capture: None,
+            captured_shortcut: None,
+            settings_tab: 0,
+            keyboard_trigger_input: config.keyboard_trigger.clone(),
             selected_preset: preset_index(&config.mapping_text).unwrap_or(0),
             mapping_input: config.mapping_text,
             capture_enabled: config.capture_enabled,
@@ -333,10 +352,36 @@ impl MapperApp {
             titlebar,
             #[cfg(debug_assertions)]
             snapshot_frames: 0,
+        };
+        if let Err(error) = configure_keyboard(&config.keyboard_trigger) {
+            set_status(&error);
         }
+        app.refresh_processes();
+        app.processes.clear();
+        #[cfg(debug_assertions)]
+        let app = app.with_snapshot_picker();
+        app
+    }
+
+    /// Pre-opens the process picker for the snapshot harness, so its ordering and
+    /// highlight can be captured without a click.
+    #[cfg(debug_assertions)]
+    fn with_snapshot_picker(mut self) -> Self {
+        if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
+            self.settings_tab = env::var("SLACKINPUT_UI_TAB")
+                .ok().and_then(|value| value.parse().ok()).unwrap_or(0);
+        }
+        if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
+            && env::var_os("SLACKINPUT_UI_PICKER").is_some()
+        {
+            self.refresh_processes();
+            self.process_picker_open = true;
+        }
+        self
     }
 
     fn apply_changes(&mut self) {
+        if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
         let mapping_text = self.mapping_input.trim().to_string();
         let text = tr(self.language);
         let Some(mapping_keys) = parse_mapping(&mapping_text) else {
@@ -344,8 +389,13 @@ impl MapperApp {
             push_log_force(text.invalid_hotkey);
             return;
         };
+        if let Err(error) = configure_keyboard(self.keyboard_trigger_input.trim()) {
+            set_status(&error);
+            return;
+        }
 
         let config = AppConfig {
+            keyboard_trigger: self.keyboard_trigger_input.trim().to_string(),
             mapping_text: mapping_text.clone(),
             capture_enabled: self.capture_enabled,
             debug_logging: self.debug_logging,
@@ -408,8 +458,116 @@ fn report_process_error(language: Language, error: Error) {
     push_log_force(&message);
 }
 
+fn remembered_process() -> String {
+    app_state()
+        .lock()
+        .expect("app state mutex poisoned")
+        .config
+        .last_process
+        .clone()
+}
+
+fn is_remembered_process(process: &process::BoundProcess, remembered: &str) -> bool {
+    !remembered.is_empty() && process.name.eq_ignore_ascii_case(remembered)
+}
+
+/// Remembering the bound executable is a convenience for next time, so it is
+/// persisted right away instead of waiting for Save. The file is rebuilt from the
+/// saved config only: live-but-unsaved settings (focus ring, pause toggle) must
+/// not be promoted just because a process was bound.
+fn remember_process(name: &str) {
+    app_state()
+        .lock()
+        .expect("app state mutex poisoned")
+        .config
+        .last_process = name.to_string();
+
+    let mut config = load_config();
+    if config.last_process == name {
+        return;
+    }
+    config.last_process = name.to_string();
+    if let Err(error) = save_config(&config) {
+        set_status(&format!("{} - {error}", tr(current_language()).save_failed));
+    }
+}
+
 impl MapperApp {
+    fn stop_shortcut_capture(&mut self) {
+        self.shortcut_capture = None;
+        self.captured_shortcut = None;
+        let saved = app_state().lock().unwrap().config.keyboard_trigger.clone();
+        if let Err(error) = configure_keyboard(&saved) { set_status(&error); }
+    }
+
+    fn update_shortcut_capture(&mut self, ctx: &egui::Context) {
+        let Some(mapping) = self.shortcut_capture else { return; };
+        if !ctx.input(|input| input.focused) || self.settings_tab != 1 {
+            self.stop_shortcut_capture();
+            return;
+        }
+        ctx.input_mut(|input| {
+            for event in &input.events {
+                if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                    if self.captured_shortcut.is_none() {
+                        let win = unsafe {
+                            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+                            GetAsyncKeyState(0x5B) < 0 || GetAsyncKeyState(0x5C) < 0
+                        };
+                        self.captured_shortcut = captured_key(*key, *modifiers, win);
+                    }
+                }
+            }
+            input.events.retain(|event| !matches!(event,
+                egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_)));
+        });
+        if self.captured_shortcut.as_ref().is_some_and(|text| {
+            parse_keyboard_trigger(text).flatten().is_some_and(|(modifiers, key)| keyboard_trigger_released(modifiers, key))
+        }) && ctx.input(|input| input.keys_down.is_empty() && input.modifiers.is_none()) {
+            let value = self.captured_shortcut.take().unwrap();
+            if mapping {
+                self.selected_preset = preset_index(&value).unwrap_or(self.selected_preset);
+                self.mapping_input = value;
+            } else {
+                self.keyboard_trigger_input = value;
+            }
+            self.stop_shortcut_capture();
+        }
+    }
+
+    fn shortcut_input_row(&mut self, ui: &mut egui::Ui, mapping: bool) {
+        let capturing = self.shortcut_capture == Some(mapping);
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 210.0).max(80.0);
+            let value = if mapping { &mut self.mapping_input } else { &mut self.keyboard_trigger_input };
+            ui.add_enabled(self.shortcut_capture.is_none(), TextEdit::singleline(value)
+                .desired_width(width).font(egui::TextStyle::Monospace));
+            if ui.add_sized(vec2(90.0, 32.0), egui::Button::new(game_text(self.language,
+                if capturing { "Cancel" } else { "Capture" },
+                if capturing { "取消捕获" } else { "捕获" }))).clicked() {
+                if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
+                if !capturing {
+                    match keyboard::configure(None) {
+                        Ok(()) => {
+                            self.shortcut_capture = Some(mapping);
+                            ui.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                        }
+                        Err(error) => set_status(&error),
+                    }
+                }
+            }
+            if ui.add_sized(vec2(80.0, 32.0), egui::Button::new(game_text(self.language, "Clear", "清空"))).clicked() {
+                if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
+                if mapping { self.mapping_input.clear(); } else { self.keyboard_trigger_input.clear(); }
+            }
+        });
+        if capturing {
+            ui.label(RichText::new(game_text(self.language, "Press and release a key or shortcut…", "请按下并松开要捕获的按键或组合键…")).small().color(theme::MINT));
+        }
+    }
+
     fn focus_controls(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 4.0;
         let language = self.language;
         theme::heading(ui, "03", game_text(language, "Focus ring", "防晕眩圆点"));
         ui.label(
@@ -438,7 +596,7 @@ impl MapperApp {
             )
             .changed();
         let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 94.0), Sense::click_and_drag());
+            ui.allocate_exact_size(vec2(ui.available_width(), 64.0), Sense::click_and_drag());
         if !config.focus_locked && (response.dragged() || response.clicked()) {
             if let Some(pointer) = response.interact_pointer_pos() {
                 config.focus_x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -461,7 +619,7 @@ impl MapperApp {
                 egui::Stroke::new(0.5, theme::EDGE),
             );
         }
-        for y in (0..94).step_by(16) {
+        for y in (0..64).step_by(16) {
             ui.painter().line_segment(
                 [
                     egui::pos2(rect.left(), rect.top() + y as f32),
@@ -605,7 +763,24 @@ impl MapperApp {
 
     fn refresh_processes(&mut self) {
         match process::enumerate() {
-            Ok(processes) => self.processes = processes,
+            Ok(processes) => {
+                self.processes = processes;
+                let mut state = app_state().lock().expect("app state mutex poisoned");
+                if state.config.auto_load_process
+                    && state.bound_process.as_ref().is_none_or(|p| p.exited())
+                {
+                    if let Some(index) = self.processes.iter().position(|p| {
+                        is_remembered_process(p, &state.config.last_process) && !p.exited()
+                    }) {
+                        state.bound_process = Some(self.processes.remove(index));
+                        state.status = game_text(
+                            self.language,
+                            "Last game process loaded automatically",
+                            "已自动加载上次的游戏进程",
+                        ).into();
+                    }
+                }
+            }
             Err(error) => report_process_error(self.language, error),
         }
     }
@@ -648,7 +823,10 @@ impl MapperApp {
                 }
             };
             ui.label(label);
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().button_padding.x = 8.0;
                 if ui
                     .button(game_text(language, "Select process", "选择进程"))
                     .clicked()
@@ -678,12 +856,11 @@ impl MapperApp {
                 let resume_label = game_text(language, "Resume game", "恢复游戏");
                 let resume_button = if paused {
                     egui::Button::new(
-                        RichText::new(format!("▶  {resume_label}"))
+                        RichText::new(resume_label)
                             .strong()
                             .color(theme::BG),
                     )
                     .fill(theme::MINT)
-                    .min_size(vec2(180.0, 44.0))
                 } else {
                     egui::Button::new(resume_label)
                 };
@@ -714,13 +891,28 @@ impl MapperApp {
                     }
                 }
             });
+            let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
+            if ui.checkbox(
+                &mut auto_load,
+                game_text(language, "Automatically load the last process", "自动加载上次的进程"),
+            ).changed() {
+                app_state().lock().unwrap().config.auto_load_process = auto_load;
+                let mut saved = load_config();
+                saved.auto_load_process = auto_load;
+                if let Err(error) = save_config(&saved) {
+                    set_status(&format!("{} - {error}", tr(language).save_failed));
+                }
+                if auto_load {
+                    self.refresh_processes();
+                }
+            }
             if ui
                 .checkbox(
                     &mut self.pause_game_on_trigger,
                     game_text(
                         language,
-                        "Pause bound game on Xbox button (applies now)",
-                        "按 Xbox 键时暂停绑定游戏（即时生效）",
+                        "Pause game on Xbox / keyboard trigger",
+                        "Xbox / 键盘触发时暂停游戏（即时生效）",
                     ),
                 )
                 .changed()
@@ -736,6 +928,7 @@ impl MapperApp {
             return;
         }
         let language = self.language;
+        let remembered = remembered_process();
         let mut open = self.process_picker_open;
         let mut selected = None;
         egui::Window::new(game_text(language, "Select game process", "选择游戏进程"))
@@ -760,13 +953,35 @@ impl MapperApp {
                         self.refresh_processes();
                     }
                 });
+                if !remembered.is_empty() {
+                    ui.label(
+                        RichText::new(tr(language).picker_order_hint)
+                            .small()
+                            .color(theme::MUTED),
+                    );
+                }
                 let filter = self.process_filter.trim().to_lowercase();
+                // Rebinding the same game is the common case, and the list is long,
+                // so the executable used last time is pulled to the top.
+                let mut order: Vec<usize> = (0..self.processes.len())
+                    .filter(|&index| {
+                        let process = &self.processes[index];
+                        !process.exited()
+                            && format!("{} (PID {})", process.name, process.pid)
+                                .to_lowercase()
+                                .contains(&filter)
+                    })
+                    .collect();
+                order.sort_by_key(|&index| {
+                    !is_remembered_process(&self.processes[index], &remembered)
+                });
                 ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                    for (index, process) in self.processes.iter().enumerate() {
+                    for &index in &order {
+                        let process = &self.processes[index];
                         let label = format!("{} (PID {})", process.name, process.pid);
-                        if !process.exited()
-                            && label.to_lowercase().contains(&filter)
-                            && ui.selectable_label(false, label).clicked()
+                        if ui
+                            .selectable_label(is_remembered_process(process, &remembered), label)
+                            .clicked()
                         {
                             selected = Some(index);
                         }
@@ -774,6 +989,7 @@ impl MapperApp {
                 });
             });
         if let Some(index) = selected {
+            let name = self.processes[index].name.clone();
             let result = {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
                 let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
@@ -785,7 +1001,10 @@ impl MapperApp {
                 result
             };
             match result {
-                Ok(_) => open = false,
+                Ok(_) => {
+                    open = false;
+                    remember_process(&name);
+                }
                 Err(error) => report_process_error(language, error),
             }
         }
@@ -798,6 +1017,7 @@ impl MapperApp {
 
 impl eframe::App for MapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_shortcut_capture(ctx);
         #[cfg(debug_assertions)]
         if let Ok(path) = env::var("SLACKINPUT_UI_SNAPSHOT") {
             use eframe::icon_data::IconDataExt;
@@ -956,13 +1176,30 @@ impl eframe::App for MapperApp {
                     });
                 });
                 ui.add_space(10.0);
-                ScrollArea::vertical()
-                    .max_height((ui.available_height() - 102.0).max(260.0))
-                    .show(ui, |ui| {
-                        ui.columns(2, |columns| {
-                            theme::card().show(&mut columns[0], |ui| {
+                ui.horizontal(|ui| {
+                    for (index, label) in [
+                        game_text(self.language, "Game process", "游戏进程"),
+                        game_text(self.language, "Shortcuts", "快捷键"),
+                        game_text(self.language, "Focus ring", "防晕眩圆点"),
+                    ].iter().enumerate() {
+                        ui.selectable_value(&mut self.settings_tab, index, *label);
+                    }
+                });
+                ui.add_space(6.0);
+                let content_height = (ui.available_height() - 100.0).max(400.0);
+                ui.allocate_ui_with_layout(vec2(ui.available_width(), content_height), Layout::top_down(Align::Min), |ui| {
+                            theme::card().show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                theme::heading(ui, "01", text.mapping);
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                if self.settings_tab == 0 {
+                                    self.game_controls(ui);
+                                    return;
+                                }
+                                if self.settings_tab == 2 {
+                                    self.focus_controls(ui);
+                                    return;
+                                }
+                                theme::heading(ui, "01", game_text(self.language, "Shortcuts", "快捷键"));
                                 ui.label(RichText::new(text.preset).color(theme::MUTED));
                                 egui::ComboBox::from_id_salt("preset_combo")
                                     .width(ui.available_width())
@@ -981,26 +1218,18 @@ impl eframe::App for MapperApp {
                                             }
                                         }
                                     });
-                                ui.add(
-                                    TextEdit::singleline(&mut self.mapping_input)
-                                        .desired_width(f32::INFINITY)
-                                        .font(egui::TextStyle::Monospace),
-                                );
+                                self.shortcut_input_row(ui, true);
                                 ui.label(
                                     RichText::new(text.mapping_hint).small().color(theme::MUTED),
                                 );
                                 ui.checkbox(&mut self.capture_enabled, text.capture);
+                                ui.label(game_text(self.language, "Keyboard trigger", "键盘触发键"));
+                                self.shortcut_input_row(ui, false);
+                                ui.label(RichText::new(game_text(self.language,
+                                    "Blank disables. Save to apply; triggers on release.",
+                                    "留空关闭，保存后生效；松开按键时触发。",
+                                )).small().color(theme::MUTED));
                             });
-                            columns[0].add_space(12.0);
-                            theme::card().show(&mut columns[0], |ui| {
-                                ui.set_width(ui.available_width());
-                                self.game_controls(ui);
-                            });
-                            theme::card().show(&mut columns[1], |ui| {
-                                ui.set_width(ui.available_width());
-                                self.focus_controls(ui);
-                            });
-                        });
                     });
                 ui.add_space(12.0);
                 ui.separator();
@@ -1017,13 +1246,18 @@ impl eframe::App for MapperApp {
                     if ui.button(text.reset).clicked() {
                         self.selected_preset = 0;
                         self.mapping_input = PRESETS[0].to_string();
+                        self.keyboard_trigger_input.clear();
                         self.capture_enabled = true;
                         self.debug_logging = false;
                         self.pause_game_on_trigger = false;
                         self.language = Language::English;
                         {
                             let mut state = app_state().lock().unwrap();
-                            state.config = AppConfig::default();
+                            let last_process = std::mem::take(&mut state.config.last_process);
+                            state.config = AppConfig {
+                                last_process,
+                                ..AppConfig::default()
+                            };
                         }
                         self.apply_changes();
                     }
@@ -1092,6 +1326,8 @@ fn main() -> Result<()> {
     #[cfg(debug_assertions)]
     if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
         config.capture_enabled = false;
+        config.keyboard_trigger.clear();
+        config.auto_load_process = false;
         config.language = env::var("SLACKINPUT_UI_LANGUAGE")
             .ok()
             .as_deref()
@@ -1503,6 +1739,70 @@ fn trigger_ready() -> bool {
     true
 }
 
+fn captured_key(key: egui::Key, modifiers: egui::Modifiers, win: bool) -> Option<String> {
+    let name = match key {
+        egui::Key::ArrowLeft => "Left",
+        egui::Key::ArrowRight => "Right",
+        egui::Key::ArrowUp => "Up",
+        egui::Key::ArrowDown => "Down",
+        egui::Key::Escape => "Esc",
+        _ => key.name(),
+    };
+    parse_token(name)?;
+    let mut parts = Vec::new();
+    if modifiers.ctrl { parts.push("Ctrl"); }
+    if modifiers.alt { parts.push("Alt"); }
+    if modifiers.shift { parts.push("Shift"); }
+    if win { parts.push("Win"); }
+    parts.push(name);
+    Some(parts.join("+"))
+}
+
+fn parse_keyboard_trigger(text: &str) -> Option<Option<(u32, u32)>> {
+    if text.trim().is_empty() {
+        return Some(None);
+    }
+    let mut modifiers = 0;
+    let mut key = None;
+    for token in text.split('+') {
+        let parsed = parse_token(token)?;
+        let modifier = match parsed {
+            VK_CONTROL => 2,
+            VK_MENU => 1,
+            VK_SHIFT => 4,
+            VK_LWIN => 8,
+            _ => 0,
+        };
+        if modifier != 0 {
+            if modifiers & modifier != 0 { return None; }
+            modifiers |= modifier;
+        } else if key.replace(parsed.0 as u32).is_some() {
+            return None;
+        }
+    }
+    Some(Some((modifiers, key?)))
+}
+
+fn configure_keyboard(text: &str) -> std::result::Result<(), String> {
+    let language = current_language();
+    let hotkey = parse_keyboard_trigger(text).ok_or_else(|| game_text(
+        language, "Invalid keyboard trigger: use F8 or Ctrl+Alt+Q", "键盘触发键格式无效，请使用 F8 或 Ctrl+Alt+Q 等格式",
+    ).to_string())?;
+    keyboard::configure(hotkey).map_err(|error| format!("{}: {error}", game_text(
+        language, "Keyboard trigger registration failed (possibly already in use)", "键盘触发键注册失败（可能已被占用）",
+    )))
+}
+
+fn keyboard_trigger_released(modifiers: u32, key: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let released = |vk: i32| unsafe { GetAsyncKeyState(vk) >= 0 };
+    released(key as i32)
+        && (modifiers & 1 == 0 || released(VK_MENU.0 as i32))
+        && (modifiers & 2 == 0 || released(VK_CONTROL.0 as i32))
+        && (modifiers & 4 == 0 || released(VK_SHIFT.0 as i32))
+        && (modifiers & 8 == 0 || (released(0x5B) && released(0x5C)))
+}
+
 fn parse_mapping(text: &str) -> Option<Vec<VIRTUAL_KEY>> {
     let tokens: Vec<&str> = text
         .split('+')
@@ -1535,6 +1835,9 @@ fn parse_token(token: &str) -> Option<VIRTUAL_KEY> {
         "ESC" | "ESCAPE" => VK_ESCAPE,
         "ENTER" | "RETURN" => VK_RETURN,
         "SPACE" => VK_SPACE,
+        "BACKSPACE" => VIRTUAL_KEY(0x08),
+        "INSERT" => VIRTUAL_KEY(0x2D),
+        "DELETE" | "DEL" => VIRTUAL_KEY(0x2E),
         "HOME" => VK_HOME,
         "END" => VK_END,
         "PAGEUP" | "PRIOR" => VK_PRIOR,
@@ -1695,12 +1998,15 @@ fn parse_config(contents: &str) -> AppConfig {
             continue;
         };
         match key.trim() {
+            "keyboard_trigger" => config.keyboard_trigger = value.trim().to_string(),
             "mapping" => config.mapping_text = value.trim().to_string(),
             "capture_enabled" => config.capture_enabled = value.trim().eq_ignore_ascii_case("true"),
             "debug_logging" => config.debug_logging = value.trim().eq_ignore_ascii_case("true"),
             "pause_game_on_trigger" => {
                 config.pause_game_on_trigger = value.trim().eq_ignore_ascii_case("true")
             }
+            "last_process" => config.last_process = value.trim().to_string(),
+            "auto_load_process" => config.auto_load_process = value.trim().eq_ignore_ascii_case("true"),
             "focus_style" => config.focus_style = marker::Style::parse(value),
             "focus_enabled" => config.focus_enabled = value.trim().eq_ignore_ascii_case("true"),
             "focus_locked" => config.focus_locked = value.trim().eq_ignore_ascii_case("true"),
@@ -1747,13 +2053,15 @@ fn save_config(config: &AppConfig) -> Result<()> {
 }
 
 fn config_body(config: &AppConfig) -> String {
-    format!(
-        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\npause_game_on_trigger={}\nfocus_enabled={}\nfocus_locked={}\nfocus_diameter={}\nfocus_opacity={}\nfocus_x={}\nfocus_y={}\nfocus_style={}\n",
+    let mut body = format!(
+        "mapping={}\ncapture_enabled={}\ndebug_logging={}\nlanguage={}\npause_game_on_trigger={}\nlast_process={}\nauto_load_process={}\nfocus_enabled={}\nfocus_locked={}\nfocus_diameter={}\nfocus_opacity={}\nfocus_x={}\nfocus_y={}\nfocus_style={}\n",
         config.mapping_text,
         config.capture_enabled,
         config.debug_logging,
         config.language.config_value(),
         config.pause_game_on_trigger,
+        config.last_process,
+        config.auto_load_process,
         config.focus_enabled,
         config.focus_locked,
         config.focus_diameter,
@@ -1761,7 +2069,9 @@ fn config_body(config: &AppConfig) -> String {
         config.focus_x,
         config.focus_y,
         config.focus_style.key()
-    )
+    );
+    body.push_str(&format!("keyboard_trigger={}\n", config.keyboard_trigger));
+    body
 }
 
 fn parse_focus_position(value: &str) -> f32 {
@@ -1777,6 +2087,50 @@ fn parse_focus_position(value: &str) -> f32 {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn captured_shortcuts_can_be_parsed() {
+        for (key, modifiers, win, expected) in [
+            (egui::Key::F8, egui::Modifiers::NONE, false, "F8"),
+            (egui::Key::ArrowLeft, egui::Modifiers::CTRL, true, "Ctrl+Win+Left"),
+            (egui::Key::Q, egui::Modifiers::CTRL | egui::Modifiers::ALT, false, "Ctrl+Alt+Q"),
+            (egui::Key::Delete, egui::Modifiers::NONE, false, "Delete"),
+        ] {
+            let text = captured_key(key, modifiers, win).unwrap();
+            assert_eq!(text, expected);
+            assert!(parse_mapping(&text).is_some());
+            assert!(parse_keyboard_trigger(&text).is_some());
+        }
+        assert!(captured_key(egui::Key::F35, egui::Modifiers::NONE, false).is_none());
+    }
+
+    #[test]
+    fn keyboard_trigger_validates_single_keys_and_combinations() {
+        assert_eq!(parse_keyboard_trigger(""), Some(None));
+        assert_eq!(parse_keyboard_trigger("F8"), Some(Some((0, 0x77))));
+        assert_eq!(parse_keyboard_trigger(" ctrl + Alt + q "), Some(Some((3, 0x51))));
+        for invalid in ["Ctrl", "Ctrl+Ctrl+Q", "A+B", "Ctrl++Q", "F25", "wat"] {
+            assert_eq!(parse_keyboard_trigger(invalid), None, "{invalid}");
+        }
+        assert!(parse_config("").keyboard_trigger.is_empty());
+        let config = AppConfig { keyboard_trigger: "Ctrl+Alt+Q".into(), ..Default::default() };
+        assert_eq!(parse_config(&config_body(&config)).keyboard_trigger, "Ctrl+Alt+Q");
+    }
+
+    #[test]
+    fn auto_load_defaults_on_and_setting_round_trips() {
+        assert!(parse_config("last_process=game.exe").auto_load_process);
+        for enabled in [false, true] {
+            let config = AppConfig {
+                auto_load_process: enabled,
+                last_process: "game.exe".into(),
+                ..Default::default()
+            };
+            let loaded = parse_config(&config_body(&config));
+            assert_eq!(loaded.auto_load_process, enabled);
+            assert_eq!(loaded.last_process, "game.exe");
+        }
+    }
 
     #[test]
     fn old_configs_keep_game_pause_disabled() {
@@ -1796,6 +2150,22 @@ mod config_tests {
                 enabled
             );
         }
+    }
+
+    #[test]
+    fn last_process_round_trips_and_old_configs_start_empty() {
+        let config = AppConfig {
+            last_process: "ForzaHorizon5.exe".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_config(&config_body(&config)).last_process,
+            "ForzaHorizon5.exe"
+        );
+        assert!(parse_config("mapping=Alt+Tab\ncapture_enabled=true\n")
+            .last_process
+            .is_empty());
+        assert!(AppConfig::default().last_process.is_empty());
     }
 
     #[test]
