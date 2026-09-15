@@ -129,6 +129,14 @@ impl Language {
             Self::Chinese => "zh-CN",
         }
     }
+
+    /// Native name shown in the language combo box; never translated.
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Chinese => "中文",
+        }
+    }
 }
 
 struct I18n {
@@ -145,8 +153,6 @@ struct I18n {
     reset: &'static str,
     logs: &'static str,
     language: &'static str,
-    english: &'static str,
-    chinese: &'static str,
     status_capture_on: &'static str,
     status_capture_off: &'static str,
     status_saved_prefix: &'static str,
@@ -182,8 +188,6 @@ fn tr(language: Language) -> I18n {
             reset: "Reset",
             logs: "Debug Log",
             language: "Language",
-            english: "English",
-            chinese: "Chinese",
             status_capture_on: "Status: Input capture enabled",
             status_capture_off: "Status: Input capture disabled",
             status_saved_prefix: "Status: Saved",
@@ -216,8 +220,6 @@ fn tr(language: Language) -> I18n {
             reset: "恢复默认",
             logs: "调试日志",
             language: "语言",
-            english: "英文",
-            chinese: "中文",
             status_capture_on: "状态: 输入捕获已启用",
             status_capture_off: "状态: 输入捕获已关闭",
             status_saved_prefix: "状态: 已保存",
@@ -240,6 +242,7 @@ fn tr(language: Language) -> I18n {
 }
 
 struct AppState {
+    auto_load_suppressed: bool,
     config: AppConfig,
     mapping_keys: Vec<VIRTUAL_KEY>,
     status: String,
@@ -249,6 +252,14 @@ struct AppState {
 }
 
 impl AppState {
+    fn auto_load_target(&self) -> Option<String> {
+        (self.config.auto_load_process
+            && !self.auto_load_suppressed
+            && !self.config.last_process.is_empty()
+            && self.bound_process.as_ref().is_none_or(|p| p.exited()))
+            .then(|| self.config.last_process.clone())
+    }
+
     fn new(config: AppConfig, mapping_keys: Vec<VIRTUAL_KEY>) -> Self {
         let text = tr(config.language);
         let status = if config.capture_enabled {
@@ -257,6 +268,7 @@ impl AppState {
             text.status_capture_off.to_string()
         };
         Self {
+            auto_load_suppressed: false,
             config,
             mapping_keys,
             status,
@@ -762,6 +774,7 @@ impl MapperApp {
     }
 
     fn refresh_processes(&mut self) {
+        app_state().lock().unwrap().auto_load_suppressed = false;
         match process::enumerate() {
             Ok(processes) => {
                 self.processes = processes;
@@ -883,6 +896,7 @@ impl MapperApp {
                         let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
                         if result.is_ok() {
                             state.bound_process = None;
+                            state.auto_load_suppressed = true;
                         }
                         result
                     };
@@ -1154,21 +1168,17 @@ impl eframe::App for MapperApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         egui::ComboBox::from_id_salt("language_combo")
                             .width(100.0)
-                            .selected_text(if self.language == Language::English {
-                                text.english
-                            } else {
-                                text.chinese
-                            })
+                            .selected_text(self.language.display_name())
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut self.language,
                                     Language::English,
-                                    text.english,
+                                    Language::English.display_name(),
                                 );
                                 ui.selectable_value(
                                     &mut self.language,
                                     Language::Chinese,
-                                    text.chinese,
+                                    Language::Chinese.display_name(),
                                 );
                             })
                             .response
@@ -1343,6 +1353,7 @@ fn main() -> Result<()> {
     let _ = APP_STATE.set(Mutex::new(AppState::new(config, mapping_keys)));
 
     spawn_raw_input_thread();
+    spawn_process_auto_loader();
     push_log_force(tr(current_language()).startup_log);
 
     let native_options = eframe::NativeOptions {
@@ -1431,6 +1442,26 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
         }
     }
     None
+}
+
+fn spawn_process_auto_loader() {
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_secs(1));
+        let target = app_state().lock().unwrap().auto_load_target();
+        let Some(target) = target else { continue; };
+        // Enumerate outside the state lock so input and UI remain responsive.
+        let Ok(processes) = process::enumerate() else { continue; };
+        let Some(process) = processes.into_iter().find(|p| {
+            is_remembered_process(p, &target) && !p.exited()
+        }) else { continue; };
+        let mut state = app_state().lock().unwrap();
+        // The user may have disabled loading, unbound, or selected another game.
+        if state.auto_load_target().as_deref() == Some(target.as_str()) && !process.exited() {
+            state.bound_process = Some(process);
+            state.status = game_text(state.config.language,
+                "Last game process loaded automatically", "已自动加载上次的游戏进程").into();
+        }
+    });
 }
 
 fn spawn_raw_input_thread() {
@@ -2087,6 +2118,26 @@ fn parse_focus_position(value: &str) -> f32 {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn auto_load_waits_for_game_without_overriding_user_choices() {
+        let mut state = AppState::new(AppConfig {
+            last_process: "game.exe".into(), ..Default::default()
+        }, vec![]);
+        assert_eq!(state.auto_load_target().as_deref(), Some("game.exe"));
+        state.config.auto_load_process = false;
+        assert!(state.auto_load_target().is_none());
+        state.config.auto_load_process = true;
+        state.auto_load_suppressed = true;
+        assert!(state.auto_load_target().is_none());
+        state.auto_load_suppressed = false;
+        state.bound_process = Some(process::BoundProcess::current_for_window_test());
+        assert!(state.auto_load_target().is_none());
+        state.bound_process = None;
+        assert!(state.auto_load_target().is_some());
+        state.config.last_process.clear();
+        assert!(state.auto_load_target().is_none());
+    }
 
     #[test]
     fn captured_shortcuts_can_be_parsed() {
