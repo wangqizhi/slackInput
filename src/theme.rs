@@ -37,7 +37,8 @@ pub fn install(ctx: &egui::Context) {
     style.visuals.widgets.inactive.weak_bg_fill = style.visuals.widgets.inactive.bg_fill;
     style.visuals.widgets.hovered.weak_bg_fill = style.visuals.widgets.hovered.bg_fill;
     style.visuals.widgets.active.weak_bg_fill = style.visuals.widgets.active.bg_fill;
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.scroll.floating = false;
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.interact_size.y = 32.0;
     style
@@ -62,7 +63,7 @@ pub fn card() -> egui::Frame {
         .fill(PANEL)
         .stroke(Stroke::new(1.0, EDGE))
         .corner_radius(0)
-        .inner_margin(Margin::same(18))
+        .inner_margin(Margin::same(12))
 }
 
 pub fn heading(ui: &mut egui::Ui, number: &str, title: &str) {

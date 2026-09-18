@@ -86,6 +86,60 @@ struct AppConfig {
     focus_y: f32,
 }
 
+impl AppConfig {
+    fn copy_focus_from(&mut self, source: &Self) {
+        self.focus_enabled = source.focus_enabled;
+        self.focus_locked = source.focus_locked;
+        self.focus_diameter = source.focus_diameter;
+        self.focus_style = source.focus_style;
+        self.focus_opacity = source.focus_opacity;
+        self.focus_x = source.focus_x;
+        self.focus_y = source.focus_y;
+    }
+}
+
+fn focus_profile_path(name: &str) -> PathBuf {
+    // Hex encoding prevents executable names from becoming paths; case is ignored on Windows.
+    let key: String = name
+        .trim()
+        .to_lowercase()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    config_dir().join("games").join(format!("{key}.ini"))
+}
+
+fn focus_body(config: &AppConfig) -> String {
+    config_body(config)
+        .lines()
+        .filter(|line| line.starts_with("focus_"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+fn write_focus_profile(path: &std::path::Path, config: &AppConfig) -> std::io::Result<()> {
+    fs::create_dir_all(path.parent().expect("profile directory"))?;
+    fs::write(path, focus_body(config))
+}
+
+fn persist_focus(state: &mut AppState) {
+    if cfg!(test) || env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
+        return;
+    }
+    let result = if let Some(process) = &state.bound_process {
+        let path = focus_profile_path(&process.name);
+        write_focus_profile(&path, &state.config).map_err(|error| error.to_string())
+    } else {
+        let mut saved = load_config();
+        saved.copy_focus_from(&state.config);
+        save_config(&saved).map_err(|error| error.to_string())
+    };
+    if let Err(error) = result {
+        state.status = format!("{}: {error}", tr(state.config.language).save_failed);
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -252,12 +306,20 @@ struct AppState {
 }
 
 impl AppState {
+    fn bind_process(&mut self, process: process::BoundProcess) {
+        let profile = fs::read_to_string(focus_profile_path(&process.name))
+            .map(|body| parse_config(&body))
+            .unwrap_or_else(|_| load_config());
+        self.config.copy_focus_from(&profile);
+        self.bound_process = Some(process);
+    }
+
     fn auto_load_target(&self) -> Option<String> {
         (self.config.auto_load_process
             && !self.auto_load_suppressed
             && !self.config.last_process.is_empty()
             && self.bound_process.as_ref().is_none_or(|p| p.exited()))
-            .then(|| self.config.last_process.clone())
+        .then(|| self.config.last_process.clone())
     }
 
     fn new(config: AppConfig, mapping_keys: Vec<VIRTUAL_KEY>) -> Self {
@@ -381,7 +443,9 @@ impl MapperApp {
     fn with_snapshot_picker(mut self) -> Self {
         if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
             self.settings_tab = env::var("SLACKINPUT_UI_TAB")
-                .ok().and_then(|value| value.parse().ok()).unwrap_or(0);
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
         }
         if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
             && env::var_os("SLACKINPUT_UI_PICKER").is_some()
@@ -393,7 +457,9 @@ impl MapperApp {
     }
 
     fn apply_changes(&mut self) {
-        if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
+        if self.shortcut_capture.is_some() {
+            self.stop_shortcut_capture();
+        }
         let mapping_text = self.mapping_input.trim().to_string();
         let text = tr(self.language);
         let Some(mapping_keys) = parse_mapping(&mapping_text) else {
@@ -438,7 +504,11 @@ impl MapperApp {
             );
         }
 
-        match save_config(&config) {
+        let mut saved = config.clone();
+        if app_state().lock().unwrap().bound_process.is_some() {
+            saved.copy_focus_from(&load_config());
+        }
+        match save_config(&saved) {
             Ok(()) => push_log_force(&format!(
                 "{}: capture_enabled={}, debug_logging={}, language={}, mapping={}",
                 text.config_updated_prefix,
@@ -509,18 +579,29 @@ impl MapperApp {
         self.shortcut_capture = None;
         self.captured_shortcut = None;
         let saved = app_state().lock().unwrap().config.keyboard_trigger.clone();
-        if let Err(error) = configure_keyboard(&saved) { set_status(&error); }
+        if let Err(error) = configure_keyboard(&saved) {
+            set_status(&error);
+        }
     }
 
     fn update_shortcut_capture(&mut self, ctx: &egui::Context) {
-        let Some(mapping) = self.shortcut_capture else { return; };
+        let Some(mapping) = self.shortcut_capture else {
+            return;
+        };
         if !ctx.input(|input| input.focused) || self.settings_tab != 1 {
             self.stop_shortcut_capture();
             return;
         }
         ctx.input_mut(|input| {
             for event in &input.events {
-                if let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                {
                     if self.captured_shortcut.is_none() {
                         let win = unsafe {
                             use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -530,12 +611,19 @@ impl MapperApp {
                     }
                 }
             }
-            input.events.retain(|event| !matches!(event,
-                egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_)));
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_)
+                )
+            });
         });
         if self.captured_shortcut.as_ref().is_some_and(|text| {
-            parse_keyboard_trigger(text).flatten().is_some_and(|(modifiers, key)| keyboard_trigger_released(modifiers, key))
-        }) && ctx.input(|input| input.keys_down.is_empty() && input.modifiers.is_none()) {
+            parse_keyboard_trigger(text)
+                .flatten()
+                .is_some_and(|(modifiers, key)| keyboard_trigger_released(modifiers, key))
+        }) && ctx.input(|input| input.keys_down.is_empty() && input.modifiers.is_none())
+        {
             let value = self.captured_shortcut.take().unwrap();
             if mapping {
                 self.selected_preset = preset_index(&value).unwrap_or(self.selected_preset);
@@ -550,31 +638,73 @@ impl MapperApp {
     fn shortcut_input_row(&mut self, ui: &mut egui::Ui, mapping: bool) {
         let capturing = self.shortcut_capture == Some(mapping);
         ui.horizontal(|ui| {
-            let width = (ui.available_width() - 210.0).max(80.0);
-            let value = if mapping { &mut self.mapping_input } else { &mut self.keyboard_trigger_input };
-            ui.add_enabled(self.shortcut_capture.is_none(), TextEdit::singleline(value)
-                .desired_width(width).font(egui::TextStyle::Monospace));
-            if ui.add_sized(vec2(90.0, 32.0), egui::Button::new(game_text(self.language,
-                if capturing { "Cancel" } else { "Capture" },
-                if capturing { "取消捕获" } else { "捕获" }))).clicked() {
-                if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
+            let width = (ui.available_width() - 184.0).max(80.0);
+            let value = if mapping {
+                &mut self.mapping_input
+            } else {
+                &mut self.keyboard_trigger_input
+            };
+            ui.add_enabled(
+                self.shortcut_capture.is_none(),
+                TextEdit::singleline(value)
+                    .desired_width(width)
+                    .font(egui::TextStyle::Monospace),
+            );
+            if ui
+                .add_sized(
+                    vec2(80.0, 32.0),
+                    egui::Button::new(game_text(
+                        self.language,
+                        if capturing { "Cancel" } else { "Capture" },
+                        if capturing { "取消捕获" } else { "捕获" },
+                    )),
+                )
+                .clicked()
+            {
+                if self.shortcut_capture.is_some() {
+                    self.stop_shortcut_capture();
+                }
                 if !capturing {
                     match keyboard::configure(None) {
                         Ok(()) => {
                             self.shortcut_capture = Some(mapping);
-                            ui.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                            ui.memory_mut(|memory| {
+                                if let Some(id) = memory.focused() {
+                                    memory.surrender_focus(id);
+                                }
+                            });
                         }
                         Err(error) => set_status(&error),
                     }
                 }
             }
-            if ui.add_sized(vec2(80.0, 32.0), egui::Button::new(game_text(self.language, "Clear", "清空"))).clicked() {
-                if self.shortcut_capture.is_some() { self.stop_shortcut_capture(); }
-                if mapping { self.mapping_input.clear(); } else { self.keyboard_trigger_input.clear(); }
+            if ui
+                .add_sized(
+                    vec2(64.0, 32.0),
+                    egui::Button::new(game_text(self.language, "Clear", "清空")),
+                )
+                .clicked()
+            {
+                if self.shortcut_capture.is_some() {
+                    self.stop_shortcut_capture();
+                }
+                if mapping {
+                    self.mapping_input.clear();
+                } else {
+                    self.keyboard_trigger_input.clear();
+                }
             }
         });
         if capturing {
-            ui.label(RichText::new(game_text(self.language, "Press and release a key or shortcut…", "请按下并松开要捕获的按键或组合键…")).small().color(theme::MINT));
+            ui.label(
+                RichText::new(game_text(
+                    self.language,
+                    "Press and release a key or shortcut…",
+                    "请按下并松开要捕获的按键或组合键…",
+                ))
+                .small()
+                .color(theme::MINT),
+            );
         }
     }
 
@@ -582,6 +712,21 @@ impl MapperApp {
         ui.spacing_mut().item_spacing.y = 4.0;
         let language = self.language;
         theme::heading(ui, "03", game_text(language, "Focus ring", "防晕眩圆点"));
+        let profile = app_state()
+            .lock()
+            .unwrap()
+            .bound_process
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| {
+                game_text(
+                    language,
+                    "Default (no game bound)",
+                    "默认配置（未绑定游戏）",
+                )
+                .into()
+            });
+        ui.label(RichText::new(profile).small().color(theme::MINT));
         ui.label(
             RichText::new(game_text(
                 language,
@@ -755,8 +900,8 @@ impl MapperApp {
         ui.label(
             RichText::new(game_text(
                 language,
-                "Changes apply now. Save to keep them.",
-                "调整即时生效，点击保存配置以保留。",
+                "Changes save automatically for this game.",
+                "调整自动保存，按游戏进程分别记忆。",
             ))
             .small()
             .color(theme::MUTED),
@@ -770,6 +915,7 @@ impl MapperApp {
             state.config.focus_opacity = config.focus_opacity;
             state.config.focus_x = config.focus_x;
             state.config.focus_y = config.focus_y;
+            persist_focus(&mut state);
         }
     }
 
@@ -785,12 +931,13 @@ impl MapperApp {
                     if let Some(index) = self.processes.iter().position(|p| {
                         is_remembered_process(p, &state.config.last_process) && !p.exited()
                     }) {
-                        state.bound_process = Some(self.processes.remove(index));
+                        state.bind_process(self.processes.remove(index));
                         state.status = game_text(
                             self.language,
                             "Last game process loaded automatically",
                             "已自动加载上次的游戏进程",
-                        ).into();
+                        )
+                        .into();
                     }
                 }
             }
@@ -801,18 +948,8 @@ impl MapperApp {
     fn game_controls(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         ui.vertical(|ui| {
-            theme::heading(ui, "02", game_text(language, "Game process", "游戏进程"));
             let (label, paused, bound) = {
-                let mut state = app_state().lock().expect("app state mutex poisoned");
-                if state.bound_process.as_ref().is_some_and(|p| p.exited()) {
-                    state.bound_process = None;
-                    state.status = game_text(
-                        language,
-                        "Bound game exited; select a process again",
-                        "绑定的游戏已退出，请重新选择进程",
-                    )
-                    .into();
-                }
+                let state = app_state().lock().expect("app state mutex poisoned");
                 match &state.bound_process {
                     Some(p) => (
                         format!(
@@ -836,10 +973,89 @@ impl MapperApp {
                 }
             };
             ui.label(label);
+            ui.add_space(12.0);
+            for resume in [false, true] {
+                let enabled = if resume { paused } else { bound && !paused };
+                let label = if resume {
+                    game_text(language, "Resume game", "恢复游戏")
+                } else {
+                    game_text(language, "Pause game", "中断游戏")
+                };
+                let highlighted = resume && paused;
+                let mut button = egui::Button::new("")
+                    .corner_radius(14)
+                    .min_size(vec2(ui.available_width(), 100.0));
+                if highlighted {
+                    button = button.fill(theme::MINT);
+                }
+                let response = ui.add_enabled(enabled, button);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+                });
+                ui.painter().text(
+                    response.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::proportional(19.0),
+                    if highlighted {
+                        theme::BG
+                    } else if enabled {
+                        theme::TEXT
+                    } else {
+                        theme::MUTED
+                    },
+                );
+                let center = egui::pos2(response.rect.left() + 36.0, response.rect.center().y);
+                let color = if highlighted {
+                    theme::BG
+                } else if enabled {
+                    theme::MINT
+                } else {
+                    theme::MUTED
+                };
+                if resume {
+                    ui.painter().add(egui::Shape::convex_polygon(
+                        vec![
+                            center + vec2(-10.0, -14.0),
+                            center + vec2(14.0, 0.0),
+                            center + vec2(-10.0, 14.0),
+                        ],
+                        color,
+                        egui::Stroke::NONE,
+                    ));
+                } else {
+                    for offset in [-9.0, 5.0] {
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                center + vec2(offset, -14.0),
+                                vec2(6.0, 28.0),
+                            ),
+                            1.0,
+                            color,
+                        );
+                    }
+                }
+                if response.clicked() {
+                    let result = {
+                        let mut state = app_state().lock().unwrap();
+                        state
+                            .bound_process
+                            .as_mut()
+                            .map(|p| if resume { p.resume() } else { p.suspend() })
+                            .transpose()
+                    };
+                    match result {
+                        Ok(_) => set_status(if resume {
+                            game_text(language, "Game resumed", "游戏已恢复")
+                        } else {
+                            game_text(language, "Game paused", "游戏已暂停")
+                        }),
+                        Err(error) => report_process_error(language, error),
+                    }
+                }
+            }
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.spacing_mut().button_padding.x = 8.0;
                 if ui
                     .button(game_text(language, "Select process", "选择进程"))
                     .clicked()
@@ -849,54 +1065,18 @@ impl MapperApp {
                 }
                 if ui
                     .add_enabled(
-                        bound && !paused,
-                        egui::Button::new(game_text(language, "Pause game", "中断游戏")),
+                        bound,
+                        egui::Button::new(game_text(language, "Unbind", "解除绑定")),
                     )
                     .clicked()
                 {
-                    let result = app_state()
-                        .lock()
-                        .unwrap()
-                        .bound_process
-                        .as_mut()
-                        .map(|p| p.suspend())
-                        .transpose();
-                    match result {
-                        Ok(_) => set_status(game_text(language, "Game paused", "游戏已暂停")),
-                        Err(error) => report_process_error(language, error),
-                    }
-                }
-                let resume_label = game_text(language, "Resume game", "恢复游戏");
-                let resume_button = if paused {
-                    egui::Button::new(
-                        RichText::new(resume_label)
-                            .strong()
-                            .color(theme::BG),
-                    )
-                    .fill(theme::MINT)
-                } else {
-                    egui::Button::new(resume_label)
-                };
-                if ui.add_enabled(paused, resume_button).clicked() {
                     let result = {
-                        let mut state = app_state().lock().expect("app state mutex poisoned");
-                        state.bound_process.as_mut().map(|p| p.resume()).transpose()
-                    };
-                    match result {
-                        Ok(_) => set_status(game_text(language, "Game resumed", "游戏已恢复")),
-                        Err(error) => report_process_error(language, error),
-                    }
-                }
-                if ui
-                    .button(game_text(language, "Unbind", "解除绑定"))
-                    .clicked()
-                {
-                    let result = {
-                        let mut state = app_state().lock().expect("app state mutex poisoned");
+                        let mut state = app_state().lock().unwrap();
                         let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
                         if result.is_ok() {
                             state.bound_process = None;
                             state.auto_load_suppressed = true;
+                            state.config.copy_focus_from(&load_config());
                         }
                         result
                     };
@@ -905,36 +1085,135 @@ impl MapperApp {
                     }
                 }
             });
-            let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
-            if ui.checkbox(
-                &mut auto_load,
-                game_text(language, "Automatically load the last process", "自动加载上次的进程"),
-            ).changed() {
-                app_state().lock().unwrap().config.auto_load_process = auto_load;
-                let mut saved = load_config();
-                saved.auto_load_process = auto_load;
-                if let Err(error) = save_config(&saved) {
-                    set_status(&format!("{} - {error}", tr(language).save_failed));
+        });
+    }
+
+    fn shortcuts_tab(&mut self, ui: &mut egui::Ui) {
+        let text = tr(self.language);
+        theme::heading(ui, "01", game_text(self.language, "Shortcuts", "快捷键"));
+        ui.label(RichText::new(text.preset).color(theme::MUTED));
+        egui::ComboBox::from_id_salt("preset_combo")
+            .width(ui.available_width())
+            .selected_text(PRESETS[self.selected_preset])
+            .show_ui(ui, |ui| {
+                for (index, preset) in PRESETS.iter().enumerate() {
+                    if ui
+                        .selectable_value(&mut self.selected_preset, index, *preset)
+                        .clicked()
+                    {
+                        self.mapping_input = (*preset).to_string();
+                    }
                 }
-                if auto_load {
-                    self.refresh_processes();
-                }
-            }
+            });
+        self.shortcut_input_row(ui, true);
+        ui.label(RichText::new(text.mapping_hint).small().color(theme::MUTED));
+        ui.label(game_text(self.language, "Keyboard trigger", "键盘触发键"));
+        self.shortcut_input_row(ui, false);
+        ui.label(
+            RichText::new(game_text(
+                self.language,
+                "Blank disables. Apply with Save in Settings. Triggers on release.",
+                "留空关闭；在设置页保存后生效，松开按键时触发。",
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
+        ui.add_space(18.0);
+        ui.separator();
+        theme::heading(ui, "02", game_text(self.language, "Key macros", "按键宏"));
+        ui.label(
+            RichText::new(game_text(
+                self.language,
+                "Reserved for future key sequences and timing controls.",
+                "预留区域：后续添加按键序列、间隔与循环设置。",
+            ))
+            .color(theme::MUTED),
+        );
+        ui.add_enabled(
+            false,
+            egui::Button::new(game_text(self.language, "Coming soon", "即将支持")),
+        );
+        ui.add_space(70.0);
+    }
+
+    fn settings_controls(&mut self, ui: &mut egui::Ui) {
+        let text = tr(self.language);
+        let language = self.language;
+        ui.horizontal(|ui| {
             if ui
-                .checkbox(
-                    &mut self.pause_game_on_trigger,
-                    game_text(
-                        language,
-                        "Pause game on Xbox / keyboard trigger",
-                        "Xbox / 键盘触发时暂停游戏（即时生效）",
-                    ),
+                .add(
+                    egui::Button::new(RichText::new(text.save).strong().color(theme::BG))
+                        .fill(theme::MINT),
                 )
-                .changed()
+                .clicked()
             {
-                app_state().lock().unwrap().config.pause_game_on_trigger =
-                    self.pause_game_on_trigger;
+                self.apply_changes();
+            }
+            if ui.button(text.reset).clicked() {
+                self.selected_preset = 0;
+                self.mapping_input = PRESETS[0].to_string();
+                self.keyboard_trigger_input.clear();
+                self.capture_enabled = true;
+                self.debug_logging = false;
+                self.pause_game_on_trigger = false;
+                self.language = Language::English;
+                {
+                    let mut state = app_state().lock().unwrap();
+                    let last_process = std::mem::take(&mut state.config.last_process);
+                    let previous = state.config.clone();
+                    state.config = AppConfig {
+                        last_process,
+                        ..AppConfig::default()
+                    };
+                    state.config.copy_focus_from(&previous);
+                }
+                self.apply_changes();
             }
         });
+
+        ui.checkbox(&mut self.capture_enabled, text.capture);
+        ui.checkbox(&mut self.debug_logging, text.debug);
+        let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
+        if ui
+            .checkbox(
+                &mut auto_load,
+                game_text(
+                    language,
+                    "Automatically load the last process",
+                    "自动加载上次的进程",
+                ),
+            )
+            .changed()
+        {
+            app_state().lock().unwrap().config.auto_load_process = auto_load;
+            let mut saved = load_config();
+            saved.auto_load_process = auto_load;
+            if let Err(error) = save_config(&saved) {
+                set_status(&format!("{} - {error}", tr(language).save_failed));
+            }
+            if auto_load {
+                self.refresh_processes();
+            }
+        }
+        if ui
+            .checkbox(
+                &mut self.pause_game_on_trigger,
+                game_text(
+                    language,
+                    "Pause game on Xbox / keyboard trigger",
+                    "Xbox / 键盘触发时暂停游戏（即时生效）",
+                ),
+            )
+            .changed()
+        {
+            app_state().lock().unwrap().config.pause_game_on_trigger = self.pause_game_on_trigger;
+        }
+        ui.separator();
+        self.focus_controls(ui);
+        ui.add_space(8.0);
+        if ui.button(text.logs).clicked() {
+            self.debug_window_open = true;
+        }
     }
 
     fn process_picker(&mut self, ctx: &egui::Context) {
@@ -948,7 +1227,7 @@ impl MapperApp {
         egui::Window::new(game_text(language, "Select game process", "选择游戏进程"))
             .id(egui::Id::new(PROCESS_PICKER_WINDOW_ID))
             .open(&mut open)
-            .default_size(vec2(560.0, 320.0))
+            .default_size(vec2(390.0, 320.0))
             .show(ctx, |ui| {
                 ui.label(game_text(
                     language,
@@ -1008,7 +1287,7 @@ impl MapperApp {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
                 let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
                 if result.is_ok() {
-                    state.bound_process = Some(self.processes.remove(index));
+                    state.bind_process(self.processes.remove(index));
                     state.status =
                         game_text(language, "Game process bound", "游戏进程已绑定").into();
                 }
@@ -1031,6 +1310,19 @@ impl MapperApp {
 
 impl eframe::App for MapperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        {
+            let mut state = app_state().lock().unwrap();
+            if state.bound_process.as_ref().is_some_and(|p| p.exited()) {
+                state.bound_process = None;
+                state.config.copy_focus_from(&load_config());
+                state.status = game_text(
+                    self.language,
+                    "Bound game exited; select a process again",
+                    "绑定的游戏已退出，请重新选择进程",
+                )
+                .into();
+            }
+        }
         self.update_shortcut_capture(ctx);
         #[cfg(debug_assertions)]
         if let Ok(path) = env::var("SLACKINPUT_UI_SNAPSHOT") {
@@ -1081,27 +1373,28 @@ impl eframe::App for MapperApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::BG)
-                    .inner_margin(egui::Margin::same(22))
+                    .inner_margin(egui::Margin::same(14))
                     .stroke(egui::Stroke::new(2.0, theme::EDGE)),
             )
             .show(ctx, |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 let mut controls_left = ui.max_rect().right();
                 let header = ui.horizontal(|ui| {
-                    ui.image((self.icon.id(), vec2(58.0, 58.0)))
+                    ui.image((self.icon.id(), vec2(34.0, 34.0)))
                         .on_hover_text(text.title);
                     ui.vertical(|ui| {
                         ui.add(egui::Label::new(
                             RichText::new("SLACK INPUT")
                                 .monospace()
-                                .size(27.0)
+                                .size(20.0)
                                 .strong()
                                 .color(theme::MINT),
                         ));
                         ui.label(
                             RichText::new(game_text(
                                 self.language,
-                                "GAME COMPANION  /  READY WHEN YOU ARE",
-                                "游戏助手  /  随时切换，安心继续",
+                                "GAME COMPANION",
+                                "游戏助手 / 随时切换",
                             ))
                             .small()
                             .color(theme::MUTED),
@@ -1135,9 +1428,10 @@ impl eframe::App for MapperApp {
                         (self.process_picker_open, PROCESS_PICKER_WINDOW_ID),
                         (self.debug_window_open, DEBUG_LOG_WINDOW_ID),
                     ] {
-                        if let Some(rect) = open.then(|| {
-                            ctx.memory(|mem| mem.area_rect(egui::Id::new(id)))
-                        }).flatten() {
+                        if let Some(rect) = open
+                            .then(|| ctx.memory(|mem| mem.area_rect(egui::Id::new(id))))
+                            .flatten()
+                        {
                             floating_windows.push(rect);
                         }
                     }
@@ -1188,107 +1482,49 @@ impl eframe::App for MapperApp {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     for (index, label) in [
-                        game_text(self.language, "Game process", "游戏进程"),
+                        game_text(self.language, "Game", "游戏"),
                         game_text(self.language, "Shortcuts", "快捷键"),
-                        game_text(self.language, "Focus ring", "防晕眩圆点"),
-                    ].iter().enumerate() {
+                        game_text(self.language, "Settings", "设置"),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
                         ui.selectable_value(&mut self.settings_tab, index, *label);
                     }
                 });
                 ui.add_space(6.0);
-                let content_height = (ui.available_height() - 100.0).max(400.0);
-                ui.allocate_ui_with_layout(vec2(ui.available_width(), content_height), Layout::top_down(Align::Min), |ui| {
-                            theme::card().show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.spacing_mut().item_spacing.y = 6.0;
-                                if self.settings_tab == 0 {
-                                    self.game_controls(ui);
-                                    return;
-                                }
-                                if self.settings_tab == 2 {
-                                    self.focus_controls(ui);
-                                    return;
-                                }
-                                theme::heading(ui, "01", game_text(self.language, "Shortcuts", "快捷键"));
-                                ui.label(RichText::new(text.preset).color(theme::MUTED));
-                                egui::ComboBox::from_id_salt("preset_combo")
-                                    .width(ui.available_width())
-                                    .selected_text(PRESETS[self.selected_preset])
-                                    .show_ui(ui, |ui| {
-                                        for (index, preset) in PRESETS.iter().enumerate() {
-                                            if ui
-                                                .selectable_value(
-                                                    &mut self.selected_preset,
-                                                    index,
-                                                    *preset,
-                                                )
-                                                .clicked()
-                                            {
-                                                self.mapping_input = (*preset).to_string();
-                                            }
-                                        }
-                                    });
-                                self.shortcut_input_row(ui, true);
-                                ui.label(
-                                    RichText::new(text.mapping_hint).small().color(theme::MUTED),
-                                );
-                                ui.checkbox(&mut self.capture_enabled, text.capture);
-                                ui.label(game_text(self.language, "Keyboard trigger", "键盘触发键"));
-                                self.shortcut_input_row(ui, false);
-                                ui.label(RichText::new(game_text(self.language,
-                                    "Blank disables. Save to apply; triggers on release.",
-                                    "留空关闭，保存后生效；松开按键时触发。",
-                                )).small().color(theme::MUTED));
-                            });
+                let content_height = (ui.available_height() - 42.0).max(80.0);
+                let scroll = ScrollArea::vertical().id_salt(("tab_scroll", self.settings_tab));
+                #[cfg(debug_assertions)]
+                let scroll = if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
+                    && env::var_os("SLACKINPUT_UI_SCROLL_BOTTOM").is_some()
+                    && self.snapshot_frames == 2
+                {
+                    scroll.vertical_scroll_offset(10000.0)
+                } else {
+                    scroll
+                };
+                scroll
+                    .auto_shrink([false, false])
+                    .max_height(content_height)
+                    .scroll_bar_visibility(if self.settings_tab == 0 {
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+                    } else {
+                        egui::scroll_area::ScrollBarVisibility::AlwaysVisible
+                    })
+                    .show(ui, |ui| {
+                        theme::card().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if self.settings_tab == 0 {
+                                self.game_controls(ui);
+                            } else if self.settings_tab == 1 {
+                                self.shortcuts_tab(ui);
+                            } else {
+                                self.settings_controls(ui);
+                            }
+                        });
                     });
-                ui.add_space(12.0);
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(text.save).strong().color(theme::BG))
-                                .fill(theme::MINT),
-                        )
-                        .clicked()
-                    {
-                        self.apply_changes();
-                    }
-                    if ui.button(text.reset).clicked() {
-                        self.selected_preset = 0;
-                        self.mapping_input = PRESETS[0].to_string();
-                        self.keyboard_trigger_input.clear();
-                        self.capture_enabled = true;
-                        self.debug_logging = false;
-                        self.pause_game_on_trigger = false;
-                        self.language = Language::English;
-                        {
-                            let mut state = app_state().lock().unwrap();
-                            let last_process = std::mem::take(&mut state.config.last_process);
-                            state.config = AppConfig {
-                                last_process,
-                                ..AppConfig::default()
-                            };
-                        }
-                        self.apply_changes();
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button(text.debug).clicked() {
-                            self.debug_window_open = true;
-                            self.debug_logging = true;
-                            app_state().lock().unwrap().config.debug_logging = true;
-                        }
-                        ui.label(
-                            RichText::new(game_text(
-                                self.language,
-                                "MINIMIZE → TRAY",
-                                "最小化 → 系统托盘",
-                            ))
-                            .monospace()
-                            .small()
-                            .color(theme::MUTED),
-                        );
-                    });
-                });
                 ui.add_space(2.0);
                 ui.label(RichText::new(status).small().color(theme::MUTED));
             });
@@ -1301,7 +1537,7 @@ impl eframe::App for MapperApp {
                 .open(&mut self.debug_window_open)
                 .resizable(true)
                 .vscroll(true)
-                .default_size(vec2(680.0, 360.0))
+                .default_size(vec2(390.0, 340.0))
                 .show(ctx, |ui| {
                     ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                         ui.add(egui::Label::new(RichText::new(logs.as_str()).monospace()).wrap());
@@ -1358,8 +1594,8 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 760.0])
-            .with_min_inner_size([900.0, 720.0])
+            .with_inner_size([480.0, 560.0])
+            .with_min_inner_size([440.0, 480.0])
             .with_resizable(true)
             .with_decorations(false)
             .with_icon(
@@ -1445,21 +1681,34 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
 }
 
 fn spawn_process_auto_loader() {
-    thread::spawn(|| loop {
-        thread::sleep(Duration::from_secs(1));
-        let target = app_state().lock().unwrap().auto_load_target();
-        let Some(target) = target else { continue; };
-        // Enumerate outside the state lock so input and UI remain responsive.
-        let Ok(processes) = process::enumerate() else { continue; };
-        let Some(process) = processes.into_iter().find(|p| {
-            is_remembered_process(p, &target) && !p.exited()
-        }) else { continue; };
-        let mut state = app_state().lock().unwrap();
-        // The user may have disabled loading, unbound, or selected another game.
-        if state.auto_load_target().as_deref() == Some(target.as_str()) && !process.exited() {
-            state.bound_process = Some(process);
-            state.status = game_text(state.config.language,
-                "Last game process loaded automatically", "已自动加载上次的游戏进程").into();
+    thread::spawn(|| {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            let target = app_state().lock().unwrap().auto_load_target();
+            let Some(target) = target else {
+                continue;
+            };
+            // Enumerate outside the state lock so input and UI remain responsive.
+            let Ok(processes) = process::enumerate() else {
+                continue;
+            };
+            let Some(process) = processes
+                .into_iter()
+                .find(|p| is_remembered_process(p, &target) && !p.exited())
+            else {
+                continue;
+            };
+            let mut state = app_state().lock().unwrap();
+            // The user may have disabled loading, unbound, or selected another game.
+            if state.auto_load_target().as_deref() == Some(target.as_str()) && !process.exited() {
+                state.bind_process(process);
+                state.status = game_text(
+                    state.config.language,
+                    "Last game process loaded automatically",
+                    "已自动加载上次的游戏进程",
+                )
+                .into();
+            }
         }
     });
 }
@@ -1781,10 +2030,18 @@ fn captured_key(key: egui::Key, modifiers: egui::Modifiers, win: bool) -> Option
     };
     parse_token(name)?;
     let mut parts = Vec::new();
-    if modifiers.ctrl { parts.push("Ctrl"); }
-    if modifiers.alt { parts.push("Alt"); }
-    if modifiers.shift { parts.push("Shift"); }
-    if win { parts.push("Win"); }
+    if modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if modifiers.alt {
+        parts.push("Alt");
+    }
+    if modifiers.shift {
+        parts.push("Shift");
+    }
+    if win {
+        parts.push("Win");
+    }
     parts.push(name);
     Some(parts.join("+"))
 }
@@ -1805,7 +2062,9 @@ fn parse_keyboard_trigger(text: &str) -> Option<Option<(u32, u32)>> {
             _ => 0,
         };
         if modifier != 0 {
-            if modifiers & modifier != 0 { return None; }
+            if modifiers & modifier != 0 {
+                return None;
+            }
             modifiers |= modifier;
         } else if key.replace(parsed.0 as u32).is_some() {
             return None;
@@ -1816,12 +2075,24 @@ fn parse_keyboard_trigger(text: &str) -> Option<Option<(u32, u32)>> {
 
 fn configure_keyboard(text: &str) -> std::result::Result<(), String> {
     let language = current_language();
-    let hotkey = parse_keyboard_trigger(text).ok_or_else(|| game_text(
-        language, "Invalid keyboard trigger: use F8 or Ctrl+Alt+Q", "键盘触发键格式无效，请使用 F8 或 Ctrl+Alt+Q 等格式",
-    ).to_string())?;
-    keyboard::configure(hotkey).map_err(|error| format!("{}: {error}", game_text(
-        language, "Keyboard trigger registration failed (possibly already in use)", "键盘触发键注册失败（可能已被占用）",
-    )))
+    let hotkey = parse_keyboard_trigger(text).ok_or_else(|| {
+        game_text(
+            language,
+            "Invalid keyboard trigger: use F8 or Ctrl+Alt+Q",
+            "键盘触发键格式无效，请使用 F8 或 Ctrl+Alt+Q 等格式",
+        )
+        .to_string()
+    })?;
+    keyboard::configure(hotkey).map_err(|error| {
+        format!(
+            "{}: {error}",
+            game_text(
+                language,
+                "Keyboard trigger registration failed (possibly already in use)",
+                "键盘触发键注册失败（可能已被占用）",
+            )
+        )
+    })
 }
 
 fn keyboard_trigger_released(modifiers: u32, key: u32) -> bool {
@@ -2037,7 +2308,9 @@ fn parse_config(contents: &str) -> AppConfig {
                 config.pause_game_on_trigger = value.trim().eq_ignore_ascii_case("true")
             }
             "last_process" => config.last_process = value.trim().to_string(),
-            "auto_load_process" => config.auto_load_process = value.trim().eq_ignore_ascii_case("true"),
+            "auto_load_process" => {
+                config.auto_load_process = value.trim().eq_ignore_ascii_case("true")
+            }
             "focus_style" => config.focus_style = marker::Style::parse(value),
             "focus_enabled" => config.focus_enabled = value.trim().eq_ignore_ascii_case("true"),
             "focus_locked" => config.focus_locked = value.trim().eq_ignore_ascii_case("true"),
@@ -2120,10 +2393,95 @@ mod config_tests {
     use super::*;
 
     #[test]
+    fn saving_one_game_preserves_another_games_profile() {
+        let dir = env::temp_dir().join(format!(
+            "slackinput-profiles-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let a = dir.join("a.ini");
+        let b = dir.join("b.ini");
+        let mut config_a = AppConfig {
+            focus_enabled: true,
+            focus_x: 0.2,
+            ..Default::default()
+        };
+        let config_b = AppConfig {
+            focus_style: marker::Style::X,
+            focus_y: 0.8,
+            ..Default::default()
+        };
+        write_focus_profile(&a, &config_a).unwrap();
+        write_focus_profile(&b, &config_b).unwrap();
+        config_a.focus_locked = true;
+        config_a.focus_x = 0.6;
+        write_focus_profile(&a, &config_a).unwrap();
+        for (path, expected) in [(&a, &config_a), (&b, &config_b)] {
+            let loaded = parse_config(&fs::read_to_string(path).unwrap());
+            assert_eq!(focus_body(&loaded), focus_body(expected));
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn game_profiles_are_case_insensitive_and_path_safe() {
+        assert_eq!(
+            focus_profile_path("Game.EXE"),
+            focus_profile_path("game.exe")
+        );
+        assert_ne!(
+            focus_profile_path("game-a.exe"),
+            focus_profile_path("game-b.exe")
+        );
+        assert_eq!(
+            focus_profile_path("../game.exe").parent().unwrap(),
+            config_dir().join("games")
+        );
+    }
+
+    #[test]
+    fn focus_profiles_round_trip_without_capturing_general_settings() {
+        let game_a = AppConfig {
+            focus_enabled: true,
+            focus_locked: true,
+            focus_style: marker::Style::Crosshair,
+            focus_diameter: 28,
+            focus_opacity: 220,
+            focus_x: 0.25,
+            focus_y: 0.75,
+            mapping_text: "Alt+Tab".into(),
+            pause_game_on_trigger: true,
+            ..Default::default()
+        };
+        let body = focus_body(&game_a);
+        assert!(body.lines().all(|line| line.starts_with("focus_")));
+        let loaded = parse_config(&body);
+        assert_eq!(focus_body(&loaded), body);
+        let mut active = AppConfig::default();
+        active.copy_focus_from(&loaded);
+        assert_eq!(focus_body(&active), body);
+        assert_eq!(active.mapping_text, "Ctrl+Win+Left");
+        assert!(!active.pause_game_on_trigger);
+        let game_b = AppConfig::default();
+        active.copy_focus_from(&game_b);
+        assert!(!active.focus_enabled);
+        active.copy_focus_from(&loaded);
+        assert_eq!((active.focus_x, active.focus_y), (0.25, 0.75));
+    }
+
+    #[test]
     fn auto_load_waits_for_game_without_overriding_user_choices() {
-        let mut state = AppState::new(AppConfig {
-            last_process: "game.exe".into(), ..Default::default()
-        }, vec![]);
+        let mut state = AppState::new(
+            AppConfig {
+                last_process: "game.exe".into(),
+                ..Default::default()
+            },
+            vec![],
+        );
         assert_eq!(state.auto_load_target().as_deref(), Some("game.exe"));
         state.config.auto_load_process = false;
         assert!(state.auto_load_target().is_none());
@@ -2143,8 +2501,18 @@ mod config_tests {
     fn captured_shortcuts_can_be_parsed() {
         for (key, modifiers, win, expected) in [
             (egui::Key::F8, egui::Modifiers::NONE, false, "F8"),
-            (egui::Key::ArrowLeft, egui::Modifiers::CTRL, true, "Ctrl+Win+Left"),
-            (egui::Key::Q, egui::Modifiers::CTRL | egui::Modifiers::ALT, false, "Ctrl+Alt+Q"),
+            (
+                egui::Key::ArrowLeft,
+                egui::Modifiers::CTRL,
+                true,
+                "Ctrl+Win+Left",
+            ),
+            (
+                egui::Key::Q,
+                egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                false,
+                "Ctrl+Alt+Q",
+            ),
             (egui::Key::Delete, egui::Modifiers::NONE, false, "Delete"),
         ] {
             let text = captured_key(key, modifiers, win).unwrap();
@@ -2159,13 +2527,22 @@ mod config_tests {
     fn keyboard_trigger_validates_single_keys_and_combinations() {
         assert_eq!(parse_keyboard_trigger(""), Some(None));
         assert_eq!(parse_keyboard_trigger("F8"), Some(Some((0, 0x77))));
-        assert_eq!(parse_keyboard_trigger(" ctrl + Alt + q "), Some(Some((3, 0x51))));
+        assert_eq!(
+            parse_keyboard_trigger(" ctrl + Alt + q "),
+            Some(Some((3, 0x51)))
+        );
         for invalid in ["Ctrl", "Ctrl+Ctrl+Q", "A+B", "Ctrl++Q", "F25", "wat"] {
             assert_eq!(parse_keyboard_trigger(invalid), None, "{invalid}");
         }
         assert!(parse_config("").keyboard_trigger.is_empty());
-        let config = AppConfig { keyboard_trigger: "Ctrl+Alt+Q".into(), ..Default::default() };
-        assert_eq!(parse_config(&config_body(&config)).keyboard_trigger, "Ctrl+Alt+Q");
+        let config = AppConfig {
+            keyboard_trigger: "Ctrl+Alt+Q".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_config(&config_body(&config)).keyboard_trigger,
+            "Ctrl+Alt+Q"
+        );
     }
 
     #[test]
@@ -2213,9 +2590,11 @@ mod config_tests {
             parse_config(&config_body(&config)).last_process,
             "ForzaHorizon5.exe"
         );
-        assert!(parse_config("mapping=Alt+Tab\ncapture_enabled=true\n")
-            .last_process
-            .is_empty());
+        assert!(
+            parse_config("mapping=Alt+Tab\ncapture_enabled=true\n")
+                .last_process
+                .is_empty()
+        );
         assert!(AppConfig::default().last_process.is_empty());
     }
 

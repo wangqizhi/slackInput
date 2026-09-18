@@ -188,7 +188,9 @@ unsafe fn tray_menu(hwnd: HWND) {
                 }
             }
             3 => {
-                app_state().lock().unwrap().config.focus_locked = !locked;
+                let mut state = app_state().lock().unwrap();
+                state.config.focus_locked = !locked;
+                crate::persist_focus(&mut state);
             }
             4 => {
                 restore();
@@ -237,6 +239,7 @@ unsafe extern "system" fn ring_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     state.config.focus_y = ((rect.top + RING_SIZE / 2 - game.top) as f32
                         / (game.bottom - game.top) as f32)
                         .clamp(0.0, 1.0);
+                    crate::persist_focus(&mut state);
                 }
             }
             LRESULT(0)
