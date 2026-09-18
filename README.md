@@ -1,12 +1,19 @@
 # SlackInput
 
-**当前版本：v0.3.7 · 更新日期：2026-09-18**
+**当前版本：v0.5.0 · 更新日期：2026-09-18**
 
 > 🎮 一个帮你优雅摸鱼的 Windows 小工具
 
 上班偷偷玩游戏？老板来了手忙脚乱切桌面？SlackInput 让你按下 Xbox 手柄的 `Guide` 键，一键切换虚拟桌面，丝滑转场，毫无破绽。
 
 ## 最近更新
+
+### v0.5.0 · 2026-09-18
+
+- 游戏页「解除绑定」旁新增「修改器」按钮，打开独立窗口，支持列表搜索、数值输入、启用/停用和停用全部。
+- 内置《数码宝贝物语：时空异客》40 项功能元数据，排除游戏速度和移动速度。隐身、扫描率不减、战斗物品不减、金钱和超常点数共 5 项接入原生适配；其余 35 项标为待适配，不可启用。
+- 5 项适配已通过自建测试验证，真实游戏效果尚待实测。绑定对应进程时自动加载配置，修改项默认关闭；切换绑定及退出时尝试恢复修改。
+- 预留静态分析、导入草稿、配置保存和按进程名加载接口，参见[修改器开发交接](docs/trainer-development.md)。本版尚不提供通用 EXE 导入按钮。
 
 ### v0.3.7 · 2026-09-18
 
@@ -134,7 +141,15 @@ cargo build --release
 
 初版匹配 `BEService.exe`、`BEService_x64.exe`、`EasyAntiCheat.exe` 和 `EasyAntiCheat_EOS.exe`，忽略大小写。检测不会暂停或打开这些进程的内存；命中也可能来自其他游戏，不保证属于当前绑定游戏。驱动、其他反作弊产品与游戏内置保护不在初版检测范围内。
 
-未来修改功能的适配方式、权限和测试计划见[技术方案](docs/game-data-editing-plan.md)，当前版本只提供提示。
+早期研究见[技术方案](docs/game-data-editing-plan.md)；v0.5.0 已加入专用修改器验证功能，当前范围与继续开发接口见[修改器开发交接](docs/trainer-development.md)。
+
+### 修改器（专用适配验证版）
+
+在「游戏」页点击「修改器」可预览功能列表。绑定 `Digimon Story Time Stranger.exe` 后，程序自动加载对应配置；有执行适配的功能可点击启用，金钱和超常点数支持输入正整数并应用。显示「已启用」表示安装成功，实际效果需在游戏相应场景确认。尚未适配项的启用按钮保持禁用。
+
+关闭修改器面板保留已启用项；「停用全部」、切换或解除绑定及正常退出程序会尝试恢复修改，失败可重试。停用不会回退已经获得的资源。重启程序只加载配置，不自动启用功能。
+
+未来导入配置目录为 `%APPDATA%\SlackInput\trainers\`，与圆点配置独立；当前内置配置无需原修改器 EXE。接口、数据格式、测试方法和后续事项见[开发交接文档](docs/trainer-development.md)。
 
 ### 键盘触发
 
@@ -211,7 +226,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 发布前先提交所有要发布的改动，并推送到 GitHub。脚本会编译本地工作区，但不会自动提交或推送代码；新标签默认指向远端默认分支，因此应确保该分支已包含本次发布的提交。
 
 ```powershell
-# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.3.7
+# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.5.0
 .\release.ps1
 
 # 也可以先创建草稿，在 GitHub 检查后再正式发布
@@ -221,7 +236,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 .\release.ps1 -NotesOnly
 ```
 
-脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.3.7`。
+脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.5.0`。
 
 脚本显式按 UTF-8 读取 Git 日志，将说明保存为 `dist/release-notes.md`，并通过 `gh --notes-file` 上传，兼容 Windows PowerShell 5.1 和 PowerShell 7 的中文编码。说明只包含已提交的 Git 记录；已发布的乱码说明需要编辑现有 Release，重新运行创建命令不会修复它。
 

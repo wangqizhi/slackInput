@@ -1,0 +1,515 @@
+{
+  "schema_version": 1,
+  "id": "digimon-time-stranger-20260709",
+  "name": "数码宝贝物语：时空异客",
+  "process_names": [
+    "Digimon Story Time Stranger.exe"
+  ],
+  "source_sha256": "655f340b386aa82d4e41c84fd6c9f434cdad2a3b6d761dbf81ba09359d0e7e84",
+  "source_version": "v1.0-v20260709",
+  "features": [
+    {
+      "id": "inf_hp",
+      "name": "无限HP",
+      "name_en": "Infinite HP",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "inf_sp",
+      "name": "无限SP",
+      "name_en": "Infinite SP",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "infinite_cp",
+      "name": "无限CP",
+      "name_en": "Infinite CP",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "stealth_mode",
+      "name": "隐身模式",
+      "name_en": "Stealth Mode",
+      "group": "战斗与探索",
+      "description": "激活时，敌人不会主动追逐玩家，但如果触碰到敌人的话还是会进入战斗的。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "max_scan_rate",
+      "name": "最高扫描率",
+      "name_en": "Max Scan Rate",
+      "group": "战斗与探索",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "scan_rate_wont_decrease",
+      "name": "扫描率不减",
+      "name_en": "Scan Rate Won't Decrease",
+      "group": "战斗与探索",
+      "description": "激活后，在转换数码宝贝时扫描率不会减少。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "battle_items_wont_decrease",
+      "name": "战斗物品不减",
+      "name_en": "Battle Items Won't Decrease",
+      "group": "战斗与探索",
+      "description": "只在战斗中生效。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "dmg",
+      "name": "超级伤害/一击必杀",
+      "name_en": "Super Damage/One Hit Kills",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "dmgmul_f",
+      "name": "伤害倍率",
+      "name_en": "Damage Multiplier",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0
+      }
+    },
+    {
+      "id": "defmul_f",
+      "name": "防御倍率",
+      "name_en": "Defense Multiplier",
+      "group": "战斗与探索",
+      "description": "",
+      "input": {
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0
+      }
+    },
+    {
+      "id": "money",
+      "name": "编辑金钱",
+      "name_en": "Edit Money",
+      "group": "资源与物品",
+      "description": "",
+      "input": {
+        "kind": "integer",
+        "default": 9999999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "moneymul_f",
+      "name": "金钱倍率",
+      "name_en": "Money Multiplier",
+      "group": "资源与物品",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0
+      }
+    },
+    {
+      "id": "agent_points",
+      "name": "编辑超常点数",
+      "name_en": "Edit Anomaly Points",
+      "group": "资源与物品",
+      "description": "",
+      "input": {
+        "kind": "integer",
+        "default": 9999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "recovery",
+      "name": "编辑恢复物品数量",
+      "name_en": "Edit Recovery Items Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看恢复物品时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "enhance",
+      "name": "编辑强化物品数量",
+      "name_en": "Edit Enhancements Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看强化物品时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "special",
+      "name": "编辑特殊物品数量",
+      "name_en": "Edit Special Items Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看特殊物品时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "equip",
+      "name": "编辑装备数量",
+      "name_en": "Edit Equipment Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看装备时生效。\n\n在更换数码宝贝装备时也会生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "material",
+      "name": "编辑材料数量",
+      "name_en": "Edit Materials Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看材料时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "farm",
+      "name": "编辑农场物品数量",
+      "name_en": "Edit Farm Items Amount",
+      "group": "资源与物品",
+      "description": "在打开物品菜单查看农场物品时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "skill",
+      "name": "编辑附件技能数量",
+      "name_en": "Edit Attachment Skills Amount",
+      "group": "资源与物品",
+      "description": "在更换数码宝贝附件技能时生效。",
+      "input": {
+        "kind": "integer",
+        "default": 999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": false
+      }
+    },
+    {
+      "id": "exp",
+      "name": "无限经验",
+      "name_en": "Infinite Exp",
+      "group": "战斗与探索",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "expmul_f",
+      "name": "经验倍率",
+      "name_en": "Exp Multiplier",
+      "group": "战斗与探索",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0
+      }
+    },
+    {
+      "id": "bond",
+      "name": "最高友情",
+      "name_en": "Max Bond",
+      "group": "战斗与探索",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "bondmul_f",
+      "name": "友情倍率",
+      "name_en": "Bond Multiplier",
+      "group": "战斗与探索",
+      "description": "在战斗胜利时生效。",
+      "input": {
+        "kind": "float",
+        "default": 1.0,
+        "min": 0.01,
+        "max": 1000.0
+      }
+    },
+    {
+      "id": "no_digivolution_requirements",
+      "name": "无进化需求",
+      "name_en": "No Digivolution Requirements",
+      "group": "战斗与探索",
+      "description": "激活后如果要取消，需要重启游戏才会恢复进化需求。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "card_game_always_win",
+      "name": "卡牌游戏：必定胜利",
+      "name_en": "Card Game: Always Win",
+      "group": "战斗与探索",
+      "description": "需要在选择卡牌之前激活。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "card_game_max_reward_selection",
+      "name": "卡牌游戏：最高奖励选择数量",
+      "name_en": "Card Game: Max Reward Selection",
+      "group": "战斗与探索",
+      "description": "需要在卡牌游戏结束前激活。\n\n注：此功能只影响可选择数量，不影响奖励数量。",
+      "input": {
+        "kind": "toggle"
+      }
+    },
+    {
+      "id": "e_digimon_level",
+      "name": "等级",
+      "name_en": "Level",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_exp",
+      "name": "经验",
+      "name_en": "Exp",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。\n\n注：显示数值会根据当前等级进行调整，如果输入数值小于当前等级所需经验值，则会显示为负数，请根据实际情况调整输入数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_max_hp_bonus",
+      "name": "最大HP (附加值)",
+      "name_en": "Max HP (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_current_hp",
+      "name": "当前HP",
+      "name_en": "Current HP",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 9999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_max_sp_bonus",
+      "name": "最大SP (附加值)",
+      "name_en": "Max SP (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_current_sp",
+      "name": "当前SP",
+      "name_en": "Current SP",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 9999,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_talent",
+      "name": "才能",
+      "name_en": "Talent",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 100,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_bond",
+      "name": "友情",
+      "name_en": "Bond",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 100,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_atk_bonus",
+      "name": "攻击力 (附加值)",
+      "name_en": "ATK (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_def_bonus",
+      "name": "防御力 (附加值)",
+      "name_en": "DEF (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_int_bonus",
+      "name": "智力 (附加值)",
+      "name_en": "INT (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_spi_bonus",
+      "name": "精神 (附加值)",
+      "name_en": "SPI (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    },
+    {
+      "id": "e_digimon_spd_bonus",
+      "name": "敏捷 (附加值)",
+      "name_en": "SPD (Bonus)",
+      "group": "数码宝贝属性",
+      "description": "打开一个数码宝贝的属性界面，然后激活此功能，将对当前查看的数码宝贝生效。\n\n注：此功能修改属性的附加值，最终属性数值会更高。\n\n注：显示数值不会马上改变，先离开再重新打开该数码宝贝属性界面才会更新显示数值。",
+      "input": {
+        "kind": "integer",
+        "default": 1000,
+        "min": 1,
+        "max": 2147483647,
+        "one_shot": true
+      }
+    }
+  ]
+}

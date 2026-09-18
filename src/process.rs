@@ -34,6 +34,17 @@ pub struct BoundProcess {
 }
 
 impl BoundProcess {
+    pub fn trainer_target(
+        &self,
+        generation: u64,
+    ) -> std::result::Result<crate::trainer::Target, String> {
+        Ok(crate::trainer::Target {
+            pid: self.pid,
+            name: self.name.clone(),
+            generation,
+            created: crate::trainer::creation_time(self.handle.0)?,
+        })
+    }
     #[cfg(test)]
     pub fn current_for_window_test() -> Self {
         Self {
@@ -89,7 +100,9 @@ pub fn enumerate() -> Result<Vec<BoundProcess>> {
             // cannot redirect an action to another process after the game exits.
             if let Ok(handle) = unsafe {
                 OpenProcess(
-                    PROCESS_SUSPEND_RESUME | PROCESS_SYNCHRONIZE,
+                    PROCESS_SUSPEND_RESUME
+                        | PROCESS_SYNCHRONIZE
+                        | windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
                     false,
                     entry.th32ProcessID,
                 )

@@ -8,6 +8,7 @@ mod process;
 mod startup;
 mod theme;
 mod titlebar;
+mod trainer;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
@@ -358,6 +359,7 @@ impl AppState {
 }
 
 struct MapperApp {
+    trainer: trainer::TrainerUi,
     shortcut_capture: Option<bool>,
     captured_shortcut: Option<String>,
     settings_tab: usize,
@@ -423,6 +425,7 @@ impl MapperApp {
         };
 
         let mut app = Self {
+            trainer: trainer::TrainerUi::new(config_dir().join("trainers")),
             shortcut_capture: None,
             captured_shortcut: None,
             settings_tab: 0,
@@ -457,6 +460,11 @@ impl MapperApp {
     /// highlight can be captured without a click.
     #[cfg(debug_assertions)]
     fn with_snapshot_picker(mut self) -> Self {
+        if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
+            && env::var_os("SLACKINPUT_UI_TRAINER").is_some()
+        {
+            self.trainer.preview();
+        }
         if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
             self.settings_tab = env::var("SLACKINPUT_UI_TAB")
                 .ok()
@@ -1167,6 +1175,12 @@ impl MapperApp {
                         report_process_error(language, error);
                     }
                 }
+                if ui
+                    .button(game_text(language, "Trainer", "修改器"))
+                    .clicked()
+                {
+                    self.trainer.open = true;
+                }
             });
         });
     }
@@ -1438,6 +1452,17 @@ impl eframe::App for MapperApp {
             }
         }
         self.update_shortcut_capture(ctx);
+        let trainer_target = {
+            let state = app_state().lock().unwrap();
+            state
+                .bound_process
+                .as_ref()
+                .and_then(|p| p.trainer_target(state.binding_generation).ok())
+        };
+        self.trainer.sync_target(trainer_target);
+        if self.trainer.exit_ready() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         #[cfg(debug_assertions)]
         if let Ok(path) = env::var("SLACKINPUT_UI_SNAPSHOT") {
             use eframe::icon_data::IconDataExt;
@@ -1459,15 +1484,20 @@ impl eframe::App for MapperApp {
             }
         }
         if ctx.input(|input| input.viewport().close_requested()) {
+            let trainer_ready = self.trainer.prepare_exit();
+            if !trainer_ready {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
             let result = {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
                 let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
-                if result.is_ok() {
+                if result.is_ok() && trainer_ready {
                     state.config.capture_enabled = false;
                 }
                 result
             };
             if let Err(error) = result {
+                self.trainer.cancel_exit();
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 report_process_error(self.language, error);
             }
@@ -1541,6 +1571,7 @@ impl eframe::App for MapperApp {
                     for (open, id) in [
                         (self.process_picker_open, PROCESS_PICKER_WINDOW_ID),
                         (self.debug_window_open, DEBUG_LOG_WINDOW_ID),
+                        (self.trainer.open, trainer::WINDOW_ID),
                     ] {
                         if let Some(rect) = open
                             .then(|| ctx.memory(|mem| mem.area_rect(egui::Id::new(id))))
@@ -1653,6 +1684,7 @@ impl eframe::App for MapperApp {
             });
 
         self.process_picker(ctx);
+        self.trainer.show(ctx, self.language);
 
         if self.debug_window_open {
             egui::Window::new(text.logs)
@@ -1718,7 +1750,16 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 560.0])
+            .with_inner_size(
+                if cfg!(debug_assertions)
+                    && env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
+                    && env::var_os("SLACKINPUT_UI_TRAINER").is_some()
+                {
+                    [740.0, 840.0]
+                } else {
+                    [480.0, 560.0]
+                },
+            )
             .with_min_inner_size([440.0, 480.0])
             .with_resizable(true)
             .with_decorations(false)
