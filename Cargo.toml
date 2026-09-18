@@ -1,6 +1,6 @@
 [package]
 name = "SlackInput"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_Com",

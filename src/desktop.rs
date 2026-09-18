@@ -138,6 +138,7 @@ unsafe fn tray_menu(hwnd: HWND) {
         .as_ref()
         .is_some_and(|p| p.paused);
     let locked = app_state().lock().unwrap().config.focus_locked;
+    let startup = crate::startup::enabled();
     let labels = [
         game_text(language, "Open SlackInput", "打开 SlackInput"),
         game_text(language, "Resume game", "恢复游戏"),
@@ -146,12 +147,15 @@ unsafe fn tray_menu(hwnd: HWND) {
         } else {
             game_text(language, "Lock focus ring", "锁定圆点")
         },
+        game_text(language, "Start with Windows", "开机自启动"),
         game_text(language, "Exit", "退出"),
     ];
     for (i, label) in labels.iter().enumerate() {
         let wide: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
-        let flags = if i == 1 && !paused {
+        let flags = if (i == 1 && !paused) || (i == 3 && startup.is_err()) {
             MF_STRING | MF_GRAYED
+        } else if i == 3 && matches!(startup, Ok(true)) {
+            MF_STRING | MF_CHECKED
         } else {
             MF_STRING
         };
@@ -193,6 +197,13 @@ unsafe fn tray_menu(hwnd: HWND) {
                 crate::persist_focus(&mut state);
             }
             4 => {
+                if let Ok(enabled) = startup {
+                    if !crate::startup::set_enabled(!enabled) {
+                        restore();
+                    }
+                }
+            }
+            5 => {
                 restore();
                 if let Some(ctx) = CONTEXT.get() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);

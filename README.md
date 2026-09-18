@@ -1,12 +1,17 @@
 # SlackInput
 
-**当前版本：v0.3.6 · 更新日期：2026-09-18**
+**当前版本：v0.3.7 · 更新日期：2026-09-18**
 
 > 🎮 一个帮你优雅摸鱼的 Windows 小工具
 
 上班偷偷玩游戏？老板来了手忙脚乱切桌面？SlackInput 让你按下 Xbox 手柄的 `Guide` 键，一键切换虚拟桌面，丝滑转场，毫无破绽。
 
 ## 最近更新
+
+### v0.3.7 · 2026-09-18
+
+- 托盘右键菜单和设置页新增「开机自启动」，默认关闭，两处状态同步，切换立即生效，无需额外保存。
+- 使用当前用户的 Windows 登录启动项，无需管理员权限；恢复默认会关闭自启动。
 
 ### v0.3.6 · 2026-09-18
 
@@ -162,6 +167,8 @@ Ctrl+Shift+Esc      ← 打开任务管理器
 
 ### 托盘与窗口
 
+- 托盘右键菜单和「设置」页均提供「开机自启动」，默认关闭。切换后立即保存并同步显示，无需点击「保存配置」；恢复默认会关闭自启动。
+- 开启后在当前用户登录 Windows 时运行本程序，无需管理员权限。启动项保存在 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 的 `SlackInput` 值中；移动 EXE 后请重新开启以更新路径。
 - 点击右上角 `_` 最小化：主窗口从底部任务栏隐藏，程序继续在系统托盘运行。
 - 单击托盘图标打开配置；右键菜单可恢复游戏、锁定/解锁圆点或退出。
 - 右上角 `X` 会退出程序，并尝试恢复已暂停的游戏。按住顶部图标、标题或空白区域均可拖动窗口（最小化和关闭按钮除外）。
@@ -204,7 +211,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 发布前先提交所有要发布的改动，并推送到 GitHub。脚本会编译本地工作区，但不会自动提交或推送代码；新标签默认指向远端默认分支，因此应确保该分支已包含本次发布的提交。
 
 ```powershell
-# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.3.6
+# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.3.7
 .\release.ps1
 
 # 也可以先创建草稿，在 GitHub 检查后再正式发布
@@ -214,7 +221,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 .\release.ps1 -NotesOnly
 ```
 
-脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.3.6`。
+脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.3.7`。
 
 脚本显式按 UTF-8 读取 Git 日志，将说明保存为 `dist/release-notes.md`，并通过 `gh --notes-file` 上传，兼容 Windows PowerShell 5.1 和 PowerShell 7 的中文编码。说明只包含已提交的 Git 记录；已发布的乱码说明需要编辑现有 Release，重新运行创建命令不会修复它。
 

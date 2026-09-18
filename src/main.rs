@@ -5,6 +5,7 @@ mod desktop;
 mod keyboard;
 mod marker;
 mod process;
+mod startup;
 mod theme;
 mod titlebar;
 
@@ -1250,9 +1251,40 @@ impl MapperApp {
                     state.config.copy_focus_from(&previous);
                 }
                 self.apply_changes();
+                startup::set_enabled(false);
             }
         });
 
+        match startup::enabled() {
+            Ok(mut enabled) => {
+                if ui
+                    .checkbox(
+                        &mut enabled,
+                        game_text(
+                            language,
+                            "Start with Windows (applies immediately)",
+                            "开机自启动（即时生效）",
+                        ),
+                    )
+                    .changed()
+                {
+                    startup::set_enabled(enabled);
+                }
+            }
+            Err(error) => {
+                ui.colored_label(
+                    theme::MUTED,
+                    format!(
+                        "{}: {error}",
+                        game_text(
+                            language,
+                            "Cannot read startup setting",
+                            "无法读取开机自启动设置"
+                        )
+                    ),
+                );
+            }
+        }
         ui.checkbox(&mut self.capture_enabled, text.capture);
         ui.checkbox(&mut self.debug_logging, text.debug);
         let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
