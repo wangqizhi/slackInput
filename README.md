@@ -1,12 +1,19 @@
 # SlackInput
 
-**当前版本：v0.3.5 · 更新日期：2026-09-18**
+**当前版本：v0.3.6 · 更新日期：2026-09-18**
 
 > 🎮 一个帮你优雅摸鱼的 Windows 小工具
 
 上班偷偷玩游戏？老板来了手忙脚乱切桌面？SlackInput 让你按下 Xbox 手柄的 `Guide` 键，一键切换虚拟桌面，丝滑转场，毫无破绽。
 
 ## 最近更新
+
+### v0.3.6 · 2026-09-18
+
+- 游戏页新增小型反作弊进程标识，紧邻运行／暂停状态；绑定游戏后每 2 秒后台只读检查已知 EAC / BattlEye 进程名。
+- 区分检测中、发现已知进程、未发现已知进程及检测失败；悬停可查看范围、命中名称与限制，切换游戏后不会沿用旧会话结果。
+- 「未发现已知进程」不代表没有反作弊或可以安全修改；这是系统范围的名称提示，尚不检查驱动、游戏内保护或进程与当前游戏的关联。
+- 新增[游戏数据修改技术方案](docs/game-data-editing-plan.md)。本版本没有读取或修改游戏数据的功能。
 
 ### v0.3.5 · 2026-09-18
 
@@ -116,6 +123,14 @@ cargo build --release
 - **快捷键**：设置常用映射和键盘触发键，支持捕获、清空与垂直滚动。下方预留按键宏区域，当前尚未实现宏编辑或执行。
 - **设置**：集中放置所有勾选项、防晕眩圆点调整、保存配置、恢复默认与调试日志入口；内容较多时可上下滚动。恢复默认保留上次进程记忆及圆点配置。
 
+### 反作弊进程提示
+
+绑定游戏后，在「运行中 / 已暂停」旁显示小标识：灰色为检测中，金色为发现已知进程或检测失败，绿色「未发现已知进程*」仅表示本次有限名单未命中。悬停可查看详情。
+
+初版匹配 `BEService.exe`、`BEService_x64.exe`、`EasyAntiCheat.exe` 和 `EasyAntiCheat_EOS.exe`，忽略大小写。检测不会暂停或打开这些进程的内存；命中也可能来自其他游戏，不保证属于当前绑定游戏。驱动、其他反作弊产品与游戏内置保护不在初版检测范围内。
+
+未来修改功能的适配方式、权限和测试计划见[技术方案](docs/game-data-editing-plan.md)，当前版本只提供提示。
+
 ### 键盘触发
 
 在「快捷键」页的「键盘触发键」填写 `F8`、`Ctrl+Alt+Q` 等单键或组合键，然后到「设置」页点击「保存配置」生效，留空则关闭。默认关闭，Xbox 键仍然可用。
@@ -178,7 +193,7 @@ Ctrl+Shift+Esc      ← 打开任务管理器
 ## 开发验证
 
 `cargo test` 包含配置兼容性、按进程名生成配置路径、游戏圆点配置读写与隔离、真实临时进程暂停/恢复，以及原生托盘隐藏/恢复、圆点拖动、锁定穿透和暂停隐藏测试。
-Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的渲染截图并退出；`SLACKINPUT_UI_LANGUAGE=zh-CN` 或 `en` 切换截图语言，`SLACKINPUT_UI_PICKER=1` 额外展开进程选择窗口，用于检查置顶与高亮效果。`SLACKINPUT_UI_TAB=0` / `1` / `2` 分别选择游戏、快捷键、设置页；`SLACKINPUT_UI_SCROLL_BOTTOM=1` 检查页签底部内容。此模式关闭输入捕获且不保存配置。
+Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的渲染截图并退出；`SLACKINPUT_UI_LANGUAGE=zh-CN` 或 `en` 切换截图语言，`SLACKINPUT_UI_PICKER=1` 额外展开进程选择窗口，用于检查置顶与高亮效果。`SLACKINPUT_UI_TAB=0` / `1` / `2` 分别选择游戏、快捷键、设置页；`SLACKINPUT_UI_SCROLL_BOTTOM=1` 检查页签底部内容。`SLACKINPUT_UI_ANTI_CHEAT=clear` / `detected` / `unknown` 在截图模式显示示例进程与对应标识，不实际绑定游戏。此模式关闭输入捕获且不保存配置。
 
 图标生成信息见 [assets/README.md](assets/README.md)。
 
@@ -189,7 +204,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 发布前先提交所有要发布的改动，并推送到 GitHub。脚本会编译本地工作区，但不会自动提交或推送代码；新标签默认指向远端默认分支，因此应确保该分支已包含本次发布的提交。
 
 ```powershell
-# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.3.5
+# 提交并推送代码后运行：自动从 Cargo.toml 读取版本，当前为 v0.3.6
 .\release.ps1
 
 # 也可以先创建草稿，在 GitHub 检查后再正式发布
@@ -199,7 +214,7 @@ Debug 构建可通过 `SLACKINPUT_UI_SNAPSHOT` 指定路径导出应用自身的
 .\release.ps1 -NotesOnly
 ```
 
-脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.3.5`。
+脚本会运行 `cargo build --release`，将产物复制为 `dist/SlackInput-win11.exe`，从上一个标签之后的 Git 提交生成发布说明，并创建带 EXE 附件的 GitHub Release。`-TagName` 可显式指定标签，例如 `.\release.ps1 -TagName v0.3.6`。
 
 脚本显式按 UTF-8 读取 Git 日志，将说明保存为 `dist/release-notes.md`，并通过 `gh --notes-file` 上传，兼容 Windows PowerShell 5.1 和 PowerShell 7 的中文编码。说明只包含已提交的 Git 记录；已发布的乱码说明需要编辑现有 Release，重新运行创建命令不会修复它。
 

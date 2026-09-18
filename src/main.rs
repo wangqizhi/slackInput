@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod anti_cheat;
 mod desktop;
 mod keyboard;
 mod marker;
@@ -296,6 +297,8 @@ fn tr(language: Language) -> I18n {
 }
 
 struct AppState {
+    binding_generation: u64,
+    anti_cheat_report: Option<anti_cheat::Report>,
     auto_load_suppressed: bool,
     config: AppConfig,
     mapping_keys: Vec<VIRTUAL_KEY>,
@@ -307,11 +310,21 @@ struct AppState {
 
 impl AppState {
     fn bind_process(&mut self, process: process::BoundProcess) {
+        self.binding_generation = self.binding_generation.wrapping_add(1);
+        self.anti_cheat_report = None;
         let profile = fs::read_to_string(focus_profile_path(&process.name))
             .map(|body| parse_config(&body))
             .unwrap_or_else(|_| load_config());
         self.config.copy_focus_from(&profile);
         self.bound_process = Some(process);
+    }
+
+    fn accept_anti_cheat_report(&mut self, generation: u64, report: anti_cheat::Report) {
+        if self.binding_generation == generation
+            && self.bound_process.as_ref().is_some_and(|p| !p.exited())
+        {
+            self.anti_cheat_report = Some(report);
+        }
     }
 
     fn auto_load_target(&self) -> Option<String> {
@@ -330,6 +343,8 @@ impl AppState {
             text.status_capture_off.to_string()
         };
         Self {
+            binding_generation: 0,
+            anti_cheat_report: None,
             auto_load_suppressed: false,
             config,
             mapping_keys,
@@ -945,26 +960,75 @@ impl MapperApp {
         }
     }
 
+    fn anti_cheat_badge(&self, ui: &mut egui::Ui) {
+        let language = self.language;
+        let report = app_state().lock().unwrap().anti_cheat_report.clone();
+        #[cfg(debug_assertions)]
+        let report = snapshot_anti_cheat().or(report);
+
+        let report = report.as_ref().filter(|report| report.fresh());
+        let (label, color, detail) = match report.map(|report| &report.outcome) {
+            None => (game_text(language, "AC: checking", "反作弊：检测中"), theme::MUTED,
+                game_text(language, "Checking known process names; stale results are discarded.", "正在检查已知进程名；过期结果不会作为当前状态。").to_string()),
+            Some(anti_cheat::Outcome::NoKnownProcess) =>
+                (game_text(language, "AC: not found*", "未发现已知进程*"), theme::MINT,
+                game_text(language, "No known EAC / BattlEye process names found. This does not mean editing is supported or safe. Drivers, in-game protection and other vendors are not checked.",
+                    "未发现已知 EAC / BattlEye 进程名，不代表支持修改或修改安全。未检查驱动、游戏内保护或其他厂商。").to_string()),
+            Some(anti_cheat::Outcome::Detected(evidence)) =>
+                (game_text(language, "AC: detected", "发现反作弊进程"), theme::GOLD,
+                format!("{}\n{}", game_text(language,
+                    "Known process names found on this PC; association with this game is unverified. Names are not signature-verified.",
+                    "本机发现已知进程名；未确认属于当前游戏，也未校验数字签名。"), evidence.join("\n"))),
+            Some(anti_cheat::Outcome::Unavailable(error)) =>
+                (game_text(language, "AC: unknown", "反作弊：未知"), theme::GOLD,
+                format!("{}\n{error}", game_text(language, "Process scan failed; retrying automatically.", "进程检查失败，将自动重试。"))),
+        };
+        let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+        let center = rect.center();
+        let points = vec![
+            center + vec2(0.0, -8.0),
+            center + vec2(7.0, -5.0),
+            center + vec2(6.0, 3.0),
+            center + vec2(0.0, 8.0),
+            center + vec2(-6.0, 3.0),
+            center + vec2(-7.0, -5.0),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            color.gamma_multiply(0.15),
+            egui::Stroke::new(1.4, color),
+        ));
+        let symbol = match report.map(|report| &report.outcome) {
+            None => "…",
+            Some(anti_cheat::Outcome::NoKnownProcess) => "−",
+            Some(anti_cheat::Outcome::Detected(_)) => "!",
+            Some(anti_cheat::Outcome::Unavailable(_)) => "?",
+        };
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            symbol,
+            egui::FontId::proportional(12.0),
+            color,
+        );
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+        response.on_hover_text(format!(
+            "{label}\n{detail}\n{}",
+            game_text(
+                language,
+                "Read-only process check every 2 seconds. No game data is read or changed.",
+                "每 2 秒只读检查进程名，不读取或修改游戏数据。"
+            )
+        ));
+    }
+
     fn game_controls(&mut self, ui: &mut egui::Ui) {
         let language = self.language;
         ui.vertical(|ui| {
             let (label, paused, bound) = {
                 let state = app_state().lock().expect("app state mutex poisoned");
                 match &state.bound_process {
-                    Some(p) => (
-                        format!(
-                            "{} (PID {}) — {}",
-                            p.name,
-                            p.pid,
-                            if p.paused {
-                                game_text(language, "Paused", "已暂停")
-                            } else {
-                                game_text(language, "Running", "运行中")
-                            }
-                        ),
-                        p.paused,
-                        true,
-                    ),
+                    Some(p) => (format!("{} (PID {})", p.name, p.pid), p.paused, true),
                     None => (
                         game_text(language, "No process bound", "未绑定进程").into(),
                         false,
@@ -972,8 +1036,26 @@ impl MapperApp {
                     ),
                 }
             };
-            ui.label(label);
-            ui.add_space(12.0);
+            #[cfg(debug_assertions)]
+            let (label, paused, bound) = if snapshot_anti_cheat().is_some() {
+                ("ExampleGame.exe (PID 1234)".to_string(), false, true)
+            } else {
+                (label, paused, bound)
+            };
+            ui.add(egui::Label::new(&label).truncate())
+                .on_hover_text(&label);
+            if bound {
+                ui.horizontal(|ui| {
+                    ui.label(if paused {
+                        game_text(language, "Paused", "已暂停")
+                    } else {
+                        game_text(language, "Running", "运行中")
+                    });
+                    self.anti_cheat_badge(ui);
+                });
+            }
+            ui.add_space(8.0);
+            let button_height = ((ui.available_height() - 64.0) / 2.0).clamp(48.0, 110.0);
             for resume in [false, true] {
                 let enabled = if resume { paused } else { bound && !paused };
                 let label = if resume {
@@ -984,7 +1066,7 @@ impl MapperApp {
                 let highlighted = resume && paused;
                 let mut button = egui::Button::new("")
                     .corner_radius(14)
-                    .min_size(vec2(ui.available_width(), 100.0));
+                    .min_size(vec2(ui.available_width(), button_height));
                 if highlighted {
                     button = button.fill(theme::MINT);
                 }
@@ -1494,36 +1576,45 @@ impl eframe::App for MapperApp {
                 });
                 ui.add_space(6.0);
                 let content_height = (ui.available_height() - 42.0).max(80.0);
-                let scroll = ScrollArea::vertical().id_salt(("tab_scroll", self.settings_tab));
-                #[cfg(debug_assertions)]
-                let scroll = if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
-                    && env::var_os("SLACKINPUT_UI_SCROLL_BOTTOM").is_some()
-                    && self.snapshot_frames == 2
-                {
-                    scroll.vertical_scroll_offset(10000.0)
-                } else {
-                    scroll
-                };
-                scroll
-                    .auto_shrink([false, false])
-                    .max_height(content_height)
-                    .scroll_bar_visibility(if self.settings_tab == 0 {
-                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
-                    } else {
-                        egui::scroll_area::ScrollBarVisibility::AlwaysVisible
-                    })
-                    .show(ui, |ui| {
-                        theme::card().show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            if self.settings_tab == 0 {
+                if self.settings_tab == 0 {
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), content_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            theme::card().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
                                 self.game_controls(ui);
-                            } else if self.settings_tab == 1 {
-                                self.shortcuts_tab(ui);
-                            } else {
-                                self.settings_controls(ui);
-                            }
+                            });
+                        },
+                    );
+                } else {
+                    let scroll = ScrollArea::vertical().id_salt(("tab_scroll", self.settings_tab));
+                    #[cfg(debug_assertions)]
+                    let scroll = if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
+                        && env::var_os("SLACKINPUT_UI_SCROLL_BOTTOM").is_some()
+                        && self.snapshot_frames == 2
+                    {
+                        scroll.vertical_scroll_offset(10000.0)
+                    } else {
+                        scroll
+                    };
+                    scroll
+                        .auto_shrink([false, false])
+                        .max_height(content_height)
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
+                        .show(ui, |ui| {
+                            theme::card().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                if self.settings_tab == 1 {
+                                    self.shortcuts_tab(ui);
+                                } else {
+                                    self.settings_controls(ui);
+                                }
+                            });
                         });
-                    });
+                }
                 ui.separator();
                 ui.add_space(2.0);
                 ui.label(RichText::new(status).small().color(theme::MUTED));
@@ -1590,6 +1681,7 @@ fn main() -> Result<()> {
 
     spawn_raw_input_thread();
     spawn_process_auto_loader();
+    spawn_anti_cheat_monitor();
     push_log_force(tr(current_language()).startup_log);
 
     let native_options = eframe::NativeOptions {
@@ -1678,6 +1770,45 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
         }
     }
     None
+}
+
+// UI-only fixture: never bind, start, suspend or modify a real game for screenshots.
+#[cfg(debug_assertions)]
+fn snapshot_anti_cheat() -> Option<anti_cheat::Report> {
+    env::var_os("SLACKINPUT_UI_SNAPSHOT")?;
+    let outcome = match env::var("SLACKINPUT_UI_ANTI_CHEAT").ok()?.as_str() {
+        "clear" => anti_cheat::Outcome::NoKnownProcess,
+        "detected" => anti_cheat::Outcome::Detected(vec!["BattlEye: beservice.exe".into()]),
+        "unknown" => anti_cheat::Outcome::Unavailable("Example: access denied".into()),
+        _ => return None,
+    };
+    Some(anti_cheat::Report {
+        outcome,
+        checked_at: Instant::now(),
+    })
+}
+
+fn spawn_anti_cheat_monitor() {
+    thread::spawn(|| {
+        loop {
+            let generation = {
+                let state = app_state().lock().unwrap();
+                state
+                    .bound_process
+                    .as_ref()
+                    .filter(|p| !p.exited())
+                    .map(|_| state.binding_generation)
+            };
+            if let Some(generation) = generation {
+                let report = anti_cheat::scan();
+                app_state()
+                    .lock()
+                    .unwrap()
+                    .accept_anti_cheat_report(generation, report);
+            }
+            thread::sleep(anti_cheat::REFRESH_INTERVAL);
+        }
+    });
 }
 
 fn spawn_process_auto_loader() {
@@ -2391,6 +2522,23 @@ fn parse_focus_position(value: &str) -> f32 {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn anti_cheat_results_cannot_cross_binding_sessions() {
+        let mut state = AppState::new(AppConfig::default(), vec![]);
+        let report = anti_cheat::Report {
+            outcome: anti_cheat::Outcome::NoKnownProcess,
+            checked_at: Instant::now(),
+        };
+        state.accept_anti_cheat_report(0, report.clone());
+        assert!(state.anti_cheat_report.is_none());
+        state.bound_process = Some(process::BoundProcess::current_for_window_test());
+        state.binding_generation = 2;
+        state.accept_anti_cheat_report(1, report.clone());
+        assert!(state.anti_cheat_report.is_none());
+        state.accept_anti_cheat_report(2, report);
+        assert!(state.anti_cheat_report.is_some());
+    }
 
     #[test]
     fn saving_one_game_preserves_another_games_profile() {
