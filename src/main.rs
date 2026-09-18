@@ -1339,9 +1339,17 @@ impl MapperApp {
         ui.separator();
         self.focus_controls(ui);
         ui.add_space(8.0);
-        if ui.button(text.logs).clicked() {
-            self.debug_window_open = true;
-        }
+        ui.horizontal(|ui| {
+            if ui.button(text.logs).clicked() {
+                self.debug_window_open = true;
+            }
+            if ui
+                .button(game_text(language, "Open data folder", "打开数据目录"))
+                .clicked()
+            {
+                open_data_dir(language);
+            }
+        });
     }
 
     fn process_picker(&mut self, ctx: &egui::Context) {
@@ -2465,6 +2473,25 @@ fn config_dir() -> PathBuf {
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_else(|| PathBuf::from("."))
         })
+}
+
+fn open_data_dir(language: Language) {
+    let dir = config_dir();
+    // The folder is only created on the first save, so make sure it exists
+    // before handing it to Explorer.
+    if let Err(error) = fs::create_dir_all(&dir) {
+        set_status(&format!(
+            "{}: {error}",
+            game_text(language, "Failed to create data folder", "无法创建数据目录")
+        ));
+        return;
+    }
+    if let Err(error) = std::process::Command::new("explorer").arg(&dir).spawn() {
+        set_status(&format!(
+            "{}: {error}",
+            game_text(language, "Failed to open data folder", "无法打开数据目录")
+        ));
+    }
 }
 
 fn config_path() -> PathBuf {
