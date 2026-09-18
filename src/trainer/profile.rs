@@ -83,8 +83,14 @@ impl Feature {
                 Ok(Some(f64::from(value)))
             }
             Input::Float { min, max, .. } => {
-                let value: f64 = text.trim().parse().map_err(|_| "请输入有效倍率".to_string())?;
-                if !value.is_finite() || !(min..=max).contains(&value) || !(value as f32).is_finite() {
+                let value: f64 = text
+                    .trim()
+                    .parse()
+                    .map_err(|_| "请输入有效倍率".to_string())?;
+                if !value.is_finite()
+                    || !(min..=max).contains(&value)
+                    || !(value as f32).is_finite()
+                {
                     return Err(format!("倍率范围：{min}–{max}"));
                 }
                 Ok(Some(value))

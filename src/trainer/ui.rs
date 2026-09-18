@@ -316,6 +316,12 @@ impl TrainerUi {
                                     ui.label(
                                         RichText::new(if active {
                                             game_text(language, "Enabled", "已启用")
+                                        } else if supported && feature.one_shot() {
+                                            game_text(
+                                                language,
+                                                "Apply once to selected Digimon",
+                                                "一次性应用到当前数码宝贝",
+                                            )
                                         } else if supported {
                                             game_text(
                                                 language,
@@ -377,7 +383,8 @@ impl TrainerUi {
                                         }
                                     }
                                 }
-                                if !feature.one_shot() && !matches!(feature.input, Input::Toggle)
+                                if !feature.one_shot()
+                                    && !matches!(feature.input, Input::Toggle)
                                     && ui
                                         .add_enabled(
                                             can_execute && active && supported,
@@ -412,9 +419,14 @@ impl TrainerUi {
                                 );
                             }
                             if let Some((value, digimon)) = state.applied.get(&feature.id) {
-                                ui.label(RichText::new(format!("{} {value} · ID {digimon}",
-                                    game_text(language, "Last applied:", "上次应用：")))
-                                    .small().color(theme::MINT));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} {value} · ID {digimon}",
+                                        game_text(language, "Last applied:", "上次应用：")
+                                    ))
+                                    .small()
+                                    .color(theme::MINT),
+                                );
                             }
                         });
                     ui.add_space(4.0);

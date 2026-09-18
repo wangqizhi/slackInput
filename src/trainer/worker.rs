@@ -222,7 +222,7 @@ fn run(
                     } else if enabled {
                         "已启用；请在游戏中的相应场景确认效果"
                     } else {
-                        "已停用；已获得的金钱或点数不会自动回退"
+                        "已停用；已经修改的资源和属性不会自动回退"
                     }
                     .into();
                 }
@@ -250,7 +250,10 @@ fn run(
             .as_ref()
             .map(|s| s.active.clone())
             .unwrap_or_default();
-        state.applied = session.as_ref().map(|s| s.applied.clone()).unwrap_or_default();
+        state.applied = session
+            .as_ref()
+            .map(|s| s.applied.clone())
+            .unwrap_or_default();
         state.error = result.is_err();
         if let Err(e) = result {
             state.message = e;

@@ -1,6 +1,10 @@
 //! Small, explicit native adapter; never executes imported assembler/Lua/DLLs.
 //! Recipes correspond to the fingerprinted sample documented in docs/trainer-development.md.
-use super::{Target, hooks::{self, Group}, profile::{self, GAME_PROCESS}};
+use super::{
+    Target,
+    hooks::{self, Group},
+    profile::{self, GAME_PROCESS},
+};
 use std::{
     collections::BTreeMap,
     mem::size_of,
@@ -504,14 +508,22 @@ impl Session {
             _ => Err("多个版本特征同时匹配，已停止修改".into()),
         }
     }
-    pub fn needs_cleanup(&self) -> bool { self.failure_requires_cleanup }
+    pub fn needs_cleanup(&self) -> bool {
+        self.failure_requires_cleanup
+    }
     pub fn set(&mut self, id: &str, value: Option<f64>, enabled: bool) -> Result<()> {
         if !enabled {
-            return self.disable(id);
+            let result = self.disable(id);
+            self.failure_requires_cleanup = result.is_err();
+            return result;
         }
         self.check_cancel()?;
         let catalog = profile::builtin();
-        let feature = catalog.features.iter().find(|f| f.id == id).ok_or("未知修改项")?;
+        let feature = catalog
+            .features
+            .iter()
+            .find(|f| f.id == id)
+            .ok_or("未知修改项")?;
         feature.parse_value(&value.map(|v| v.to_string()).unwrap_or_default())?;
         if matches!(id, "money" | "agent_points") {
             let value = value
@@ -520,7 +532,9 @@ impl Session {
             return self.set_money(id, value as i32);
         }
         if let Some(group) = hooks::group(id) {
-            if group == Group::Stats { return self.apply_stat(id, value.ok_or("缺少属性数值")? as i32); }
+            if group == Group::Stats {
+                return self.apply_stat(id, value.ok_or("缺少属性数值")? as i32);
+            }
             return self.set_group(group, id, value);
         }
         if self.active.contains_key(id) {
@@ -590,9 +604,6 @@ impl Session {
         let hook = self.money.as_ref().unwrap();
         self.failure_requires_cleanup = true;
         if !hook.installed {
-            if group == Group::Stats {
-                self.process.write(hook.cave + 0x1000, &[0; 12])?;
-            }
             self.money.as_mut().unwrap().installed = true;
             let hook = self.money.as_ref().unwrap();
             self.process.replace_code(
@@ -603,7 +614,11 @@ impl Session {
             )?;
         }
         let hook = self.money.as_ref().unwrap();
-        if self.process.read(hook.patch.address, hook.patch.replacement.len())? != hook.patch.replacement {
+        if self
+            .process
+            .read(hook.patch.address, hook.patch.replacement.len())?
+            != hook.patch.replacement
+        {
             return Err("金钱/点数代码已被其他程序改变，请先停用全部".into());
         }
         let offset = if id == "money" { 0x1000 } else { 0x1004 };
@@ -616,22 +631,39 @@ impl Session {
     fn ensure_group(&mut self, group: Group) -> Result<()> {
         if !self.hooks.contains_key(&group) {
             let variants = group.variants();
-            let recipes: Vec<_> = variants.iter().map(|v| Recipe { pattern: v.pattern, offset: v.offset, original: &[], replacement: &[] }).collect();
+            let recipes: Vec<_> = variants
+                .iter()
+                .map(|v| Recipe {
+                    pattern: v.pattern,
+                    offset: v.offset,
+                    original: &[],
+                    replacement: &[],
+                })
+                .collect();
             let (address, index) = self.locate(&recipes)?;
             let expected = Pattern::parse(variants[index].original)?;
             let original = self.process.read(address, expected.0.len())?;
-            if expected.matches(&original) != [0] { return Err("目标原指令不匹配".into()); }
+            if expected.matches(&original) != [0] {
+                return Err("目标原指令不匹配".into());
+            }
             hooks::validate_original(group, &original)?;
             if let Some(pattern) = group.layout_pattern() {
-                if self.scan(&Pattern::parse(pattern)?)?.len() != 1 { return Err("游戏字段布局校验失败，此版本暂不支持".into()); }
+                if self.scan(&Pattern::parse(pattern)?)?.len() != 1 {
+                    return Err("游戏字段布局校验失败，此版本暂不支持".into());
+                }
             }
             self.check_cancel()?;
             let cave = self.process.allocate_near(address)?;
             let initialize = (|| {
                 let code = hooks::build(group, &original, cave, address + original.len())?;
-                if code.len() > 0x1000 { return Err("适配代码超出分配范围".into()); }
+                if code.len() > 0x1000 {
+                    return Err("适配代码超出分配范围".into());
+                }
                 self.process.write(cave, &code)?;
-                if group == Group::Bond { self.process.write(cave + 0x1104, &9999999f32.to_le_bytes())?; }
+                if group == Group::Bond {
+                    self.process
+                        .write(cave + 0x1104, &9999999f32.to_le_bytes())?;
+                }
                 self.process.protect(cave, 0x1000, PAGE_EXECUTE_READ)?;
                 self.process.flush(cave, code.len())?;
                 let mut replacement = relative_jump(address, cave)?;
@@ -640,19 +672,46 @@ impl Session {
             })();
             let replacement = match initialize {
                 Ok(v) => v,
-                Err(e) => { let _ = unsafe { VirtualFreeEx(self.process.handle.0, cave as _, 0, MEM_RELEASE) }; return Err(e); }
+                Err(e) => {
+                    let _ =
+                        unsafe { VirtualFreeEx(self.process.handle.0, cave as _, 0, MEM_RELEASE) };
+                    return Err(e);
+                }
             };
-            self.hooks.insert(group, GroupHook { patch: Patch { address, original, replacement }, cave, installed: false });
+            self.hooks.insert(
+                group,
+                GroupHook {
+                    patch: Patch {
+                        address,
+                        original,
+                        replacement,
+                    },
+                    cave,
+                    installed: false,
+                },
+            );
         }
         self.check_cancel()?;
         let hook = &self.hooks[&group];
         if !hook.installed {
+            if group == Group::Stats {
+                self.process.write(hook.cave + 0x1000, &[0; 12])?;
+            }
             self.failure_requires_cleanup = true;
             self.hooks.get_mut(&group).unwrap().installed = true;
             let hook = &self.hooks[&group];
-            self.process.replace_code(hook.patch.address, &hook.patch.original, &hook.patch.replacement, &[(hook.cave, 0x1000)])?;
+            self.process.replace_code(
+                hook.patch.address,
+                &hook.patch.original,
+                &hook.patch.replacement,
+                &[(hook.cave, 0x1000)],
+            )?;
             self.failure_requires_cleanup = false;
-        } else if self.process.read(hook.patch.address, hook.patch.replacement.len())? != hook.patch.replacement {
+        } else if self
+            .process
+            .read(hook.patch.address, hook.patch.replacement.len())?
+            != hook.patch.replacement
+        {
             self.failure_requires_cleanup = true;
             return Err("修改代码已被其他程序改变，请先停用全部".into());
         }
@@ -661,13 +720,20 @@ impl Session {
     fn set_group(&mut self, group: Group, id: &str, value: Option<f64>) -> Result<()> {
         self.ensure_group(group)?;
         self.check_cancel()?;
-        let index = group.parameters().iter().position(|s| *s == id).ok_or("未知脚本参数")?;
+        let index = group
+            .parameters()
+            .iter()
+            .position(|s| *s == id)
+            .ok_or("未知脚本参数")?;
         let bytes = if id.ends_with("_f") {
             (value.ok_or("缺少倍率")? as f32).to_le_bytes()
-        } else { (value.unwrap_or(1.0) as i32).to_le_bytes() };
+        } else {
+            (value.unwrap_or(1.0) as i32).to_le_bytes()
+        };
         let address = self.hooks[&group].cave + 0x1000 + index * 4;
         self.failure_requires_cleanup = true;
-        self.process.paused(&[], || self.process.write(address, &bytes))?;
+        self.process
+            .paused(&[], || self.process.write(address, &bytes))?;
         self.active.insert(id.into(), value);
         self.failure_requires_cleanup = false;
         Ok(())
@@ -679,8 +745,10 @@ impl Session {
         let cave = self.hooks[&Group::Stats].cave;
         // The capture hook starts empty. Never queue a write for whichever creature
         // might happen to be viewed later; the user must explicitly apply again.
-        if self.process.read(cave + 0x1000, 8)? == [0;8] {
-            return Err("已准备属性读取。请在游戏中打开或重新打开数码宝贝属性界面，再点击“应用”".into());
+        if self.process.read(cave + 0x1000, 8)? == [0; 8] {
+            return Err(
+                "已准备属性读取。请在游戏中打开或重新打开数码宝贝属性界面，再点击“应用”".into(),
+            );
         }
         let mut write_started = false;
         let result = self.process.paused(&[(cave, 0x1000)], || {
@@ -693,31 +761,59 @@ impl Session {
             if self.process.read(pointer + 4, 4)? != captured_id.to_le_bytes() {
                 return Err("数码宝贝对象已变化，请重新打开属性界面".into());
             }
-            let originals: Result<Vec<_>> = writes.iter().map(|(offset,_)| self.process.read(pointer + offset, 4)).collect();
+            let originals: Result<Vec<_>> = writes
+                .iter()
+                .map(|(offset, _)| self.process.read(pointer + offset, 4))
+                .collect();
             let originals = originals?;
             write_started = true;
             for (index, (offset, bytes)) in writes.iter().enumerate() {
                 if let Err(e) = self.process.write(pointer + offset, bytes) {
                     let mut rollback_errors = vec![];
                     for j in 0..=index {
-                        if let Err(e) = self.process.write(pointer + writes[j].0, &originals[j]) { rollback_errors.push(e); }
+                        if let Err(e) = self.process.write(pointer + writes[j].0, &originals[j]) {
+                            rollback_errors.push(e);
+                        }
                     }
-                    return Err(format!("属性写入失败：{e}{}", if rollback_errors.is_empty() { String::new() } else { format!("；回滚失败：{}", rollback_errors.join("；")) }));
+                    return Err(format!(
+                        "属性写入失败：{e}{}",
+                        if rollback_errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!("；回滚失败：{}", rollback_errors.join("；"))
+                        }
+                    ));
                 }
             }
             Ok(captured_id)
         });
         match result {
-            Ok(captured_id) => { self.applied.insert(id.into(), (f64::from(value), captured_id)); Ok(()) }
-            Err(e) => { self.failure_requires_cleanup = write_started; Err(e) }
+            Ok(captured_id) => {
+                self.applied
+                    .insert(id.into(), (f64::from(value), captured_id));
+                Ok(())
+            }
+            Err(e) => {
+                self.failure_requires_cleanup = write_started;
+                Err(e)
+            }
         }
     }
     fn restore_group(&mut self, group: Group) -> Result<()> {
         if let Some(hook) = self.hooks.get(&group) {
             if hook.installed {
                 self.failure_requires_cleanup = true;
-                if self.process.read(hook.patch.address, hook.patch.original.len())? != hook.patch.original {
-                    self.process.replace_code(hook.patch.address, &hook.patch.replacement, &hook.patch.original, &[(hook.cave, 0x1000)])?;
+                if self
+                    .process
+                    .read(hook.patch.address, hook.patch.original.len())?
+                    != hook.patch.original
+                {
+                    self.process.replace_code(
+                        hook.patch.address,
+                        &hook.patch.replacement,
+                        &hook.patch.original,
+                        &[(hook.cave, 0x1000)],
+                    )?;
                 }
                 self.hooks.get_mut(&group).unwrap().installed = false;
             }
@@ -734,10 +830,18 @@ impl Session {
             if let Some(hook) = self.hooks.get(&group) {
                 self.failure_requires_cleanup = true;
                 if let Some(index) = group.parameters().iter().position(|s| *s == id) {
-                    self.process.paused(&[], || self.process.write(hook.cave + 0x1000 + index * 4, &0u32.to_le_bytes()))?;
+                    self.process.paused(&[], || {
+                        self.process
+                            .write(hook.cave + 0x1000 + index * 4, &0u32.to_le_bytes())
+                    })?;
                 }
-                let shared = group.parameters().iter().any(|other| *other != id && self.active.contains_key(*other));
-                if !shared { self.restore_group(group)?; }
+                let shared = group
+                    .parameters()
+                    .iter()
+                    .any(|other| *other != id && self.active.contains_key(*other));
+                if !shared {
+                    self.restore_group(group)?;
+                }
             }
         } else if matches!(id, "money" | "agent_points") {
             if let Some(hook) = &self.money {
@@ -816,7 +920,11 @@ impl Session {
         // installation that failed before publishing an active UI state.
         for group in self.hooks.keys().copied().collect::<Vec<_>>() {
             match self.restore_group(group) {
-                Ok(()) => { for id in group.parameters() { self.active.remove(*id); } }
+                Ok(()) => {
+                    for id in group.parameters() {
+                        self.active.remove(*id);
+                    }
+                }
                 Err(e) => errors.push(e),
             }
         }

@@ -1,5 +1,5 @@
-mod native;
 mod hooks;
+mod native;
 pub mod profile;
 mod ui;
 mod worker;
