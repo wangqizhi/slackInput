@@ -5,12 +5,16 @@ use super::{
 };
 use crate::{Language, game_text, theme};
 use eframe::egui::{self, RichText};
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 pub const WINDOW_ID: &str = "trainer_window";
 pub struct TrainerUi {
     pub open: bool,
     worker: Worker,
+    directory: PathBuf,
     target: Option<Target>,
     inputs: HashMap<String, String>,
     search: String,
@@ -19,12 +23,15 @@ pub struct TrainerUi {
     closing: bool,
     preview: bool,
     preview_frames: u32,
+    overwrite: HashSet<String>,
+    delete: Option<String>,
 }
 impl TrainerUi {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             open: false,
-            worker: Worker::new(directory),
+            worker: Worker::new(directory.clone()),
+            directory,
             target: None,
             inputs: HashMap::new(),
             search: String::new(),
@@ -33,6 +40,8 @@ impl TrainerUi {
             closing: false,
             preview: false,
             preview_frames: 0,
+            overwrite: HashSet::new(),
+            delete: None,
         }
     }
     pub fn sync_target(&mut self, target: Option<Target>) {
@@ -42,6 +51,8 @@ impl TrainerUi {
         self.worker.poll();
         if target != self.target {
             self.inputs.clear();
+            self.delete = None;
+            self.overwrite.clear();
             self.local_error.clear();
             self.target = target.clone();
             self.worker.bind(target);
@@ -67,6 +78,9 @@ impl TrainerUi {
         false
     }
     pub fn exit_ready(&mut self) -> bool {
+        if self.preview && !self.closing {
+            return false;
+        }
         self.worker.poll();
         if self.closing && !self.worker.state.busy && self.worker.state.error {
             self.closing = false;
@@ -82,7 +96,14 @@ impl TrainerUi {
         self.preview = true;
         self.open = true;
         self.worker.state.profile = Some(profile::builtin());
+        self.worker.state.busy = false;
         self.worker.state.message = "界面预览：未连接游戏，不会执行修改".into();
+        if std::env::var_os("SLACKINPUT_UI_TRAINER_IMPORT").is_some() {
+            self.worker.state.draft = Some(profile::ImportDraft {
+                profile: profile::builtin(),
+                warnings: vec!["静态导入预览：不会执行 EXE".into()],
+            });
+        }
         self.search = std::env::var("SLACKINPUT_UI_TRAINER_FILTER").unwrap_or_default();
         if std::env::var_os("SLACKINPUT_UI_TRAINER_ACTIVE").is_some() {
             self.worker
@@ -134,15 +155,184 @@ impl TrainerUi {
             },
         );
     }
+    fn management(&mut self, ui: &mut egui::Ui, language: Language) {
+        let state = self.worker.state.clone();
+        let ready = !state.busy
+            && !state.cleanup_failed
+            && !self.closing
+            && !self.preview
+            && state.target == self.target;
+        if ui
+            .add_enabled(
+                ready && state.draft.is_none(),
+                egui::Button::new(game_text(language, "Import trainer EXE", "导入修改器 EXE")),
+            )
+            .clicked()
+        {
+            self.overwrite.clear();
+            self.delete = None;
+            self.worker.analyze();
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    ready && state.draft.is_none(),
+                    egui::Button::new(game_text(language, "Reload config", "重新加载配置")),
+                )
+                .clicked()
+            {
+                self.inputs.clear();
+                self.delete = None;
+                self.worker.bind(self.target.clone());
+            }
+            ui.label(
+                RichText::new(self.directory.display().to_string())
+                    .small()
+                    .color(theme::MUTED),
+            );
+        });
+        if let Some(draft) = &state.draft {
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(format!(
+                    "导入预览：{} · {} 项",
+                    draft.profile.name,
+                    draft.profile.features.len()
+                ));
+                for warning in &draft.warnings {
+                    ui.colored_label(theme::GOLD, warning);
+                }
+                let conflicts: Vec<_> = draft
+                    .profile
+                    .features
+                    .iter()
+                    .filter(|f| {
+                        state.profile.as_ref().is_some_and(|p| {
+                            p.features
+                                .iter()
+                                .any(|x| profile::name_key(&x.name) == profile::name_key(&f.name))
+                        })
+                    })
+                    .collect();
+                ui.label(format!(
+                    "新增 {} 项，同名 {} 项（默认跳过）",
+                    draft.profile.features.len() - conflicts.len(),
+                    conflicts.len()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("全部覆盖").clicked() {
+                        self.overwrite = conflicts
+                            .iter()
+                            .map(|f| profile::name_key(&f.name))
+                            .collect();
+                    }
+                    if ui.button("全部跳过").clicked() {
+                        self.overwrite.clear();
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .id_salt("import_review")
+                    .max_height((ui.available_height() - 160.0).clamp(80.0, 360.0))
+                    .show(ui, |ui| {
+                        for f in &draft.profile.features {
+                            let key = profile::name_key(&f.name);
+                            if conflicts.iter().any(|x| x.id == f.id) {
+                                ui.horizontal(|ui| {
+                                    ui.label(&f.name);
+                                    let mut replace = self.overwrite.contains(&key);
+                                    ui.radio_value(&mut replace, true, "覆盖");
+                                    ui.radio_value(&mut replace, false, "跳过");
+                                    if replace {
+                                        self.overwrite.insert(key);
+                                    } else {
+                                        self.overwrite.remove(&key);
+                                    }
+                                });
+                            } else {
+                                ui.label(format!("新增：{}", f.name));
+                            }
+                        }
+                    });
+                ui.label("保存前将停用当前全部修改；不会自动启用新项目。");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(ready, egui::Button::new("确认导入"))
+                        .clicked()
+                    {
+                        let merged = if let Some(current) = &state.profile {
+                            profile::merge(current, &draft.profile, &self.overwrite)
+                        } else {
+                            Ok(draft.profile.clone())
+                        };
+                        match merged {
+                            Ok(p) => {
+                                self.inputs.clear();
+                                self.local_error.clear();
+                                self.worker.save(p);
+                            }
+                            Err(e) => self.local_error = e,
+                        }
+                    }
+                    if ui.add_enabled(ready, egui::Button::new("取消")).clicked() {
+                        self.worker.dismiss_draft();
+                    }
+                });
+            });
+        }
+        if let Some(id) = self.delete.clone()
+            && let Some(p) = &state.profile
+            && let Some(f) = p.features.iter().find(|f| f.id == id)
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("删除“{}”？保存前将停用全部修改。", f.name));
+                if ui
+                    .add_enabled(ready, egui::Button::new("确认删除"))
+                    .clicked()
+                {
+                    let mut updated = p.clone();
+                    updated.features.retain(|f| f.id != id);
+                    self.worker.save(updated);
+                    self.inputs.remove(&id);
+                    self.delete = None;
+                }
+                if ui.button("取消").clicked() {
+                    self.delete = None;
+                }
+            });
+        }
+    }
     fn contents(&mut self, ui: &mut egui::Ui, language: Language) {
+        if crate::app_state().lock().unwrap().features_locked() {
+            ui.disable();
+        }
         self.preview_frames = self.preview_frames.saturating_add(1);
         let state = self.worker.state.clone();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        self.management(ui, language);
+        if state.draft.is_some() {
+            if self.worker.state.busy {
+                ui.spinner();
+            }
+            if state.error {
+                ui.colored_label(theme::GOLD, &state.message);
+            }
+            if !self.local_error.is_empty() {
+                ui.colored_label(theme::GOLD, &self.local_error);
+            }
+            if state.cleanup_failed
+                && ui
+                    .add_enabled(!state.busy, egui::Button::new("重试停用全部"))
+                    .clicked()
+            {
+                self.worker.stop_all(false);
+            }
+            return;
+        }
         let catalog = profile::builtin();
         let Some(profile) = state
             .profile
             .as_ref()
-            .or_else(|| state.target.is_none().then_some(&catalog))
+            .or_else(|| self.preview.then_some(&catalog))
         else {
             ui.heading(game_text(
                 language,
@@ -150,6 +340,9 @@ impl TrainerUi {
                 "未找到匹配的修改器",
             ));
             ui.label(&state.message);
+            if !self.local_error.is_empty() {
+                ui.colored_label(theme::GOLD, &self.local_error);
+            }
             ui.label(game_text(
                 language,
                 "Bind Digimon Story Time Stranger.exe to load the built-in profile.",
@@ -230,7 +423,9 @@ impl TrainerUi {
         let pending_target = state.target != self.target;
         let can_execute = !self.preview
             && !self.closing
-            && !state.busy
+            && !self.worker.state.busy
+            && state.draft.is_none()
+            && self.delete.is_none()
             && !state.cleanup_failed
             && !pending_target
             && state.target.is_some();
@@ -305,13 +500,11 @@ impl TrainerUi {
                                 ui.vertical(|ui| {
                                     let controls_width = if !matches!(feature.input, Input::Toggle)
                                     {
-                                        285.0
+                                        335.0
                                     } else {
-                                        235.0
+                                        285.0
                                     };
-                                    ui.set_width(
-                                        (ui.available_width() - controls_width).max(160.0),
-                                    );
+                                    ui.set_width((ui.available_width() - controls_width).max(90.0));
                                     ui.label(RichText::new(label).strong());
                                     ui.label(
                                         RichText::new(if active {
@@ -348,6 +541,20 @@ impl TrainerUi {
                                         ));
                                 } else {
                                     ui.add_space(104.0);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !state.busy
+                                            && !state.cleanup_failed
+                                            && !self.preview
+                                            && !self.closing
+                                            && state.target == self.target
+                                            && state.draft.is_none(),
+                                        egui::Button::new(game_text(language, "Delete", "删除")),
+                                    )
+                                    .clicked()
+                                {
+                                    self.delete = Some(feature.id.clone());
                                 }
                                 let button = if feature.one_shot() {
                                     game_text(language, "Apply", "应用")

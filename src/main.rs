@@ -301,6 +301,7 @@ fn tr(language: Language) -> I18n {
 struct AppState {
     binding_generation: u64,
     anti_cheat_report: Option<anti_cheat::Report>,
+    anti_cheat_locked: bool,
     auto_load_suppressed: bool,
     config: AppConfig,
     mapping_keys: Vec<VIRTUAL_KEY>,
@@ -311,9 +312,18 @@ struct AppState {
 }
 
 impl AppState {
+    fn features_locked(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(report) = snapshot_anti_cheat() {
+            return matches!(report.outcome, anti_cheat::Outcome::Detected(_));
+        }
+        self.anti_cheat_locked && self.bound_process.as_ref().is_some_and(|p| !p.exited())
+    }
+
     fn bind_process(&mut self, process: process::BoundProcess) {
         self.binding_generation = self.binding_generation.wrapping_add(1);
         self.anti_cheat_report = None;
+        self.anti_cheat_locked = false;
         let profile = fs::read_to_string(focus_profile_path(&process.name))
             .map(|body| parse_config(&body))
             .unwrap_or_else(|_| load_config());
@@ -325,6 +335,25 @@ impl AppState {
         if self.binding_generation == generation
             && self.bound_process.as_ref().is_some_and(|p| !p.exited())
         {
+            match &report.outcome {
+                anti_cheat::Outcome::Detected(_) => self.anti_cheat_locked = true,
+                anti_cheat::Outcome::NoKnownProcess => self.anti_cheat_locked = false,
+                anti_cheat::Outcome::Unavailable(_) => {}
+            }
+            if self.anti_cheat_locked {
+                if let Some(process) = self.bound_process.as_mut().filter(|p| p.paused) {
+                    if let Err(error) = process.resume() {
+                        self.status = format!(
+                            "{}: {error}",
+                            game_text(
+                                self.config.language,
+                                "Failed to resume game",
+                                "恢复游戏失败"
+                            )
+                        );
+                    }
+                }
+            }
             self.anti_cheat_report = Some(report);
         }
     }
@@ -347,6 +376,7 @@ impl AppState {
         Self {
             binding_generation: 0,
             anti_cheat_report: None,
+            anti_cheat_locked: false,
             auto_load_suppressed: false,
             config,
             mapping_keys,
@@ -992,6 +1022,36 @@ impl MapperApp {
                 (game_text(language, "AC: unknown", "反作弊：未知"), theme::GOLD,
                 format!("{}\n{error}", game_text(language, "Process scan failed; retrying automatically.", "进程检查失败，将自动重试。"))),
         };
+        if app_state().lock().unwrap().features_locked() {
+            let hint = game_text(
+                language,
+                "Unlock / block anti-cheat (in development)",
+                "解锁/屏蔽反作弊（开发中）",
+            );
+            let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+            let center = rect.center();
+            let stroke = egui::Stroke::new(1.8, theme::GOLD);
+            ui.painter().rect_stroke(
+                egui::Rect::from_center_size(center + vec2(0.0, -4.0), vec2(9.0, 12.0)),
+                5.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(center + vec2(0.0, 4.0), vec2(16.0, 12.0)),
+                3.0,
+                theme::GOLD,
+            );
+            ui.painter()
+                .circle_filled(center + vec2(0.0, 3.0), 1.6, theme::BG);
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hint));
+            if response.clicked() {
+                set_status(hint);
+            }
+            response.on_hover_text(format!("{hint}\n{detail}"));
+            return;
+        }
         let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
         let center = rect.center();
         let points = vec![
@@ -1064,123 +1124,130 @@ impl MapperApp {
                 });
             }
             ui.add_space(8.0);
-            let button_height = ((ui.available_height() - 64.0) / 2.0).clamp(48.0, 110.0);
-            for resume in [false, true] {
-                let enabled = if resume { paused } else { bound && !paused };
-                let label = if resume {
-                    game_text(language, "Resume game", "恢复游戏")
-                } else {
-                    game_text(language, "Pause game", "中断游戏")
-                };
-                let highlighted = resume && paused;
-                let mut button = egui::Button::new("")
-                    .corner_radius(14)
-                    .min_size(vec2(ui.available_width(), button_height));
-                if highlighted {
-                    button = button.fill(theme::MINT);
-                }
-                let response = ui.add_enabled(enabled, button);
-                response.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
-                });
-                ui.painter().text(
-                    response.rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    egui::FontId::proportional(19.0),
+            let features_locked = app_state().lock().unwrap().features_locked();
+            ui.add_enabled_ui(!features_locked, |ui| {
+                let button_height = ((ui.available_height() - 64.0) / 2.0).clamp(48.0, 110.0);
+                for resume in [false, true] {
+                    let enabled = ui.is_enabled() && if resume { paused } else { bound && !paused };
+                    let label = if resume {
+                        game_text(language, "Resume game", "恢复游戏")
+                    } else {
+                        game_text(language, "Pause game", "中断游戏")
+                    };
+                    let highlighted = enabled && resume && paused;
+                    let mut button = egui::Button::new("")
+                        .corner_radius(14)
+                        .min_size(vec2(ui.available_width(), button_height));
                     if highlighted {
+                        button = button.fill(theme::MINT);
+                    }
+                    let response = ui.add_enabled(enabled, button);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+                    });
+                    ui.painter().text(
+                        response.rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(19.0),
+                        if highlighted {
+                            theme::BG
+                        } else if enabled {
+                            theme::TEXT
+                        } else {
+                            theme::MUTED
+                        },
+                    );
+                    let center = egui::pos2(response.rect.left() + 36.0, response.rect.center().y);
+                    let color = if highlighted {
                         theme::BG
                     } else if enabled {
-                        theme::TEXT
+                        theme::MINT
                     } else {
                         theme::MUTED
-                    },
-                );
-                let center = egui::pos2(response.rect.left() + 36.0, response.rect.center().y);
-                let color = if highlighted {
-                    theme::BG
-                } else if enabled {
-                    theme::MINT
-                } else {
-                    theme::MUTED
-                };
-                if resume {
-                    ui.painter().add(egui::Shape::convex_polygon(
-                        vec![
-                            center + vec2(-10.0, -14.0),
-                            center + vec2(14.0, 0.0),
-                            center + vec2(-10.0, 14.0),
-                        ],
-                        color,
-                        egui::Stroke::NONE,
-                    ));
-                } else {
-                    for offset in [-9.0, 5.0] {
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                center + vec2(offset, -14.0),
-                                vec2(6.0, 28.0),
-                            ),
-                            1.0,
+                    };
+                    if resume {
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            vec![
+                                center + vec2(-10.0, -14.0),
+                                center + vec2(14.0, 0.0),
+                                center + vec2(-10.0, 14.0),
+                            ],
                             color,
-                        );
-                    }
-                }
-                if response.clicked() {
-                    let result = {
-                        let mut state = app_state().lock().unwrap();
-                        state
-                            .bound_process
-                            .as_mut()
-                            .map(|p| if resume { p.resume() } else { p.suspend() })
-                            .transpose()
-                    };
-                    match result {
-                        Ok(_) => set_status(if resume {
-                            game_text(language, "Game resumed", "游戏已恢复")
-                        } else {
-                            game_text(language, "Game paused", "游戏已暂停")
-                        }),
-                        Err(error) => report_process_error(language, error),
-                    }
-                }
-            }
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .button(game_text(language, "Select process", "选择进程"))
-                    .clicked()
-                {
-                    self.refresh_processes();
-                    self.process_picker_open = true;
-                }
-                if ui
-                    .add_enabled(
-                        bound,
-                        egui::Button::new(game_text(language, "Unbind", "解除绑定")),
-                    )
-                    .clicked()
-                {
-                    let result = {
-                        let mut state = app_state().lock().unwrap();
-                        let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
-                        if result.is_ok() {
-                            state.bound_process = None;
-                            state.auto_load_suppressed = true;
-                            state.config.copy_focus_from(&load_config());
+                            egui::Stroke::NONE,
+                        ));
+                    } else {
+                        for offset in [-9.0, 5.0] {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    center + vec2(offset, -14.0),
+                                    vec2(6.0, 28.0),
+                                ),
+                                1.0,
+                                color,
+                            );
                         }
-                        result
-                    };
-                    if let Err(error) = result {
-                        report_process_error(language, error);
+                    }
+                    if response.clicked() {
+                        let result = {
+                            let mut state = app_state().lock().unwrap();
+                            if state.features_locked() {
+                                return;
+                            }
+                            state
+                                .bound_process
+                                .as_mut()
+                                .map(|p| if resume { p.resume() } else { p.suspend() })
+                                .transpose()
+                        };
+                        match result {
+                            Ok(_) => set_status(if resume {
+                                game_text(language, "Game resumed", "游戏已恢复")
+                            } else {
+                                game_text(language, "Game paused", "游戏已暂停")
+                            }),
+                            Err(error) => report_process_error(language, error),
+                        }
                     }
                 }
-                if ui
-                    .button(game_text(language, "Trainer", "修改器"))
-                    .clicked()
-                {
-                    self.trainer.open = true;
-                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(game_text(language, "Select process", "选择进程"))
+                        .clicked()
+                    {
+                        self.refresh_processes();
+                        self.process_picker_open = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            bound,
+                            egui::Button::new(game_text(language, "Unbind", "解除绑定")),
+                        )
+                        .clicked()
+                    {
+                        let result = {
+                            let mut state = app_state().lock().unwrap();
+                            let result =
+                                state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                            if result.is_ok() {
+                                state.bound_process = None;
+                                state.auto_load_suppressed = true;
+                                state.config.copy_focus_from(&load_config());
+                            }
+                            result
+                        };
+                        if let Err(error) = result {
+                            report_process_error(language, error);
+                        }
+                    }
+                    if ui
+                        .button(game_text(language, "Trainer", "修改器"))
+                        .clicked()
+                    {
+                        self.trainer.open = true;
+                    }
+                });
             });
         });
     }
@@ -1246,7 +1313,13 @@ impl MapperApp {
             {
                 self.apply_changes();
             }
-            if ui.button(text.reset).clicked() {
+            if ui
+                .add_enabled(
+                    !app_state().lock().unwrap().features_locked(),
+                    egui::Button::new(text.reset),
+                )
+                .clicked()
+            {
                 self.selected_preset = 0;
                 self.mapping_input = PRESETS[0].to_string();
                 self.keyboard_trigger_input.clear();
@@ -1269,86 +1342,90 @@ impl MapperApp {
             }
         });
 
-        match startup::enabled() {
-            Ok(mut enabled) => {
-                if ui
-                    .checkbox(
-                        &mut enabled,
-                        game_text(
-                            language,
-                            "Start with Windows (applies immediately)",
-                            "开机自启动（即时生效）",
+        let features_locked = app_state().lock().unwrap().features_locked();
+        ui.add_enabled_ui(!features_locked, |ui| {
+            match startup::enabled() {
+                Ok(mut enabled) => {
+                    if ui
+                        .checkbox(
+                            &mut enabled,
+                            game_text(
+                                language,
+                                "Start with Windows (applies immediately)",
+                                "开机自启动（即时生效）",
+                            ),
+                        )
+                        .changed()
+                    {
+                        startup::set_enabled(enabled);
+                    }
+                }
+                Err(error) => {
+                    ui.colored_label(
+                        theme::MUTED,
+                        format!(
+                            "{}: {error}",
+                            game_text(
+                                language,
+                                "Cannot read startup setting",
+                                "无法读取开机自启动设置"
+                            )
                         ),
-                    )
-                    .changed()
-                {
-                    startup::set_enabled(enabled);
+                    );
                 }
             }
-            Err(error) => {
-                ui.colored_label(
-                    theme::MUTED,
-                    format!(
-                        "{}: {error}",
-                        game_text(
-                            language,
-                            "Cannot read startup setting",
-                            "无法读取开机自启动设置"
-                        )
+            ui.checkbox(&mut self.capture_enabled, text.capture);
+            ui.checkbox(&mut self.debug_logging, text.debug);
+            let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
+            if ui
+                .checkbox(
+                    &mut auto_load,
+                    game_text(
+                        language,
+                        "Automatically load the last process",
+                        "自动加载上次的进程",
                     ),
-                );
-            }
-        }
-        ui.checkbox(&mut self.capture_enabled, text.capture);
-        ui.checkbox(&mut self.debug_logging, text.debug);
-        let mut auto_load = app_state().lock().unwrap().config.auto_load_process;
-        if ui
-            .checkbox(
-                &mut auto_load,
-                game_text(
-                    language,
-                    "Automatically load the last process",
-                    "自动加载上次的进程",
-                ),
-            )
-            .changed()
-        {
-            app_state().lock().unwrap().config.auto_load_process = auto_load;
-            let mut saved = load_config();
-            saved.auto_load_process = auto_load;
-            if let Err(error) = save_config(&saved) {
-                set_status(&format!("{} - {error}", tr(language).save_failed));
-            }
-            if auto_load {
-                self.refresh_processes();
-            }
-        }
-        if ui
-            .checkbox(
-                &mut self.pause_game_on_trigger,
-                game_text(
-                    language,
-                    "Pause game on Xbox / keyboard trigger",
-                    "Xbox / 键盘触发时暂停游戏（即时生效）",
-                ),
-            )
-            .changed()
-        {
-            app_state().lock().unwrap().config.pause_game_on_trigger = self.pause_game_on_trigger;
-        }
-        ui.separator();
-        self.focus_controls(ui);
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(text.logs).clicked() {
-                self.debug_window_open = true;
+                )
+                .changed()
+            {
+                app_state().lock().unwrap().config.auto_load_process = auto_load;
+                let mut saved = load_config();
+                saved.auto_load_process = auto_load;
+                if let Err(error) = save_config(&saved) {
+                    set_status(&format!("{} - {error}", tr(language).save_failed));
+                }
+                if auto_load {
+                    self.refresh_processes();
+                }
             }
             if ui
-                .button(game_text(language, "Open data folder", "打开数据目录"))
-                .clicked()
+                .checkbox(
+                    &mut self.pause_game_on_trigger,
+                    game_text(
+                        language,
+                        "Pause game on Xbox / keyboard trigger",
+                        "Xbox / 键盘触发时暂停游戏（即时生效）",
+                    ),
+                )
+                .changed()
             {
-                open_data_dir(language);
+                app_state().lock().unwrap().config.pause_game_on_trigger =
+                    self.pause_game_on_trigger;
             }
+            ui.separator();
+            self.focus_controls(ui);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(text.logs).clicked() {
+                    self.debug_window_open = true;
+                }
+                if ui
+                    .button(game_text(language, "Open data folder", "打开数据目录"))
+                    .clicked()
+                {
+                    open_data_dir(language);
+                }
+            });
         });
     }
 
@@ -1691,6 +1768,9 @@ impl eframe::App for MapperApp {
                 ui.label(RichText::new(status).small().color(theme::MUTED));
             });
 
+        if app_state().lock().unwrap().features_locked() {
+            self.process_picker_open = false;
+        }
         self.process_picker(ctx);
         self.trainer.show(ctx, self.language);
 
@@ -2167,7 +2247,10 @@ fn trigger_mapping(device_name: &str) -> Result<()> {
     // Suspension failure must not suppress the configured shortcut.
     let pause_result = {
         let mut state = app_state().lock().expect("app state mutex poisoned");
-        if state.config.capture_enabled && state.config.pause_game_on_trigger {
+        if state.config.capture_enabled
+            && state.config.pause_game_on_trigger
+            && !state.features_locked()
+        {
             state
                 .bound_process
                 .as_mut()
@@ -2638,6 +2721,30 @@ mod config_tests {
         assert!(state.anti_cheat_report.is_none());
         state.accept_anti_cheat_report(2, report);
         assert!(state.anti_cheat_report.is_some());
+    }
+
+    #[test]
+    fn anti_cheat_lock_survives_failed_scans_and_clears_on_confirmed_clear() {
+        let mut state = AppState::new(AppConfig::default(), Vec::new());
+        state.bound_process = Some(process::BoundProcess::current_for_window_test());
+        let report = |outcome| anti_cheat::Report {
+            outcome,
+            checked_at: Instant::now(),
+        };
+        state.accept_anti_cheat_report(
+            0,
+            report(anti_cheat::Outcome::Detected(vec!["test".into()])),
+        );
+        assert!(state.features_locked());
+        state.accept_anti_cheat_report(0, report(anti_cheat::Outcome::Unavailable("test".into())));
+        assert!(state.features_locked());
+        state.accept_anti_cheat_report(1, report(anti_cheat::Outcome::NoKnownProcess));
+        assert!(state.features_locked());
+        state.accept_anti_cheat_report(0, report(anti_cheat::Outcome::NoKnownProcess));
+        assert!(!state.features_locked());
+        state.anti_cheat_locked = true;
+        state.bound_process = None;
+        assert!(!state.features_locked());
     }
 
     #[test]

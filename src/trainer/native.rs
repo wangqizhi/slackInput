@@ -315,40 +315,25 @@ impl Pattern {
     }
 }
 
-struct Recipe {
-    pattern: &'static str,
+struct Recipe<'a> {
+    pattern: &'a str,
     offset: usize,
-    original: &'static [u8],
-    replacement: &'static [u8],
+    original: &'a [u8],
+    replacement: &'a [u8],
 }
-fn recipes(id: &str) -> Vec<Recipe> {
-    match id {
-        "stealth_mode" => vec![Recipe {
-            pattern: "48 8B * * * 00 00 * 85 * 75 07 32 C0 E9 * * 00 00 0F 57",
-            offset: 10,
-            original: &[0x75, 0x07, 0x32, 0xc0],
-            replacement: &[0xb0, 0x01, 0x66, 0x90],
-        }],
-        "scan_rate_wont_decrease" => [
-            "66 44 89 66 02 E8 * * * * * 8D",
-            "66 44 89 66 02 * 8D * * * E8",
-        ]
+fn recipes<'a>(config: &'a super::config::Execution, id: &str) -> Vec<Recipe<'a>> {
+    config
+        .patches
+        .get(id)
         .into_iter()
-        .map(|pattern| Recipe {
-            pattern,
-            offset: 0,
-            original: &[0x66, 0x44, 0x89, 0x66, 0x02],
-            replacement: &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+        .flatten()
+        .map(|v| Recipe {
+            pattern: &v.pattern,
+            offset: v.offset,
+            original: &v.original,
+            replacement: &v.replacement,
         })
-        .collect(),
-        "battle_items_wont_decrease" => vec![Recipe {
-            pattern: "E8 * * * * 8B * * 85 * 0F 84 * * 00 00 80 * * * 00 00 00 0F 85 * * 00 00",
-            offset: 10,
-            original: &[0x0f, 0x84],
-            replacement: &[0x90, 0xe9],
-        }],
-        _ => vec![],
-    }
+        .collect()
 }
 
 struct Patch {
@@ -368,6 +353,7 @@ struct GroupHook {
 }
 
 pub struct Session {
+    pub config: super::config::Execution,
     process: Process,
     sections: Vec<(usize, usize)>,
     patches: BTreeMap<String, Patch>,
@@ -449,6 +435,7 @@ impl Session {
             return Err("未找到游戏代码节".into());
         }
         Ok(Self {
+            config: Default::default(),
             process,
             sections,
             patches: BTreeMap::new(),
@@ -540,7 +527,7 @@ impl Session {
         if self.active.contains_key(id) {
             return Ok(());
         }
-        let variants = recipes(id);
+        let variants = recipes(&self.config, id);
         if variants.is_empty() {
             return Err("该功能执行适配尚未实现".into());
         }
@@ -563,24 +550,11 @@ impl Session {
     }
     fn set_money(&mut self, id: &str, value: i32) -> Result<()> {
         if self.money.is_none() {
-            let variants = [
-                Recipe {
-                    pattern: "F3 0F 5A * F2 0F 58 4B 50 F2 0F 11",
-                    offset: 4,
-                    original: &[],
-                    replacement: &[],
-                },
-                Recipe {
-                    pattern: "F2 0F 58 4B 50 66 0F 2F * * * * * F2 0F 11",
-                    offset: 0,
-                    original: &[],
-                    replacement: &[],
-                },
-            ];
+            let variants = recipes(&self.config, "money");
             let (address, _) = self.locate(&variants)?;
             self.check_cancel()?;
             let cave = self.process.allocate_near(address)?;
-            let code = money_code(cave, address + 5)?;
+            let code = money_code_configured(cave, address + 5, &self.config)?;
             let initialize = self
                 .process
                 .write(cave, &code)
@@ -630,24 +604,24 @@ impl Session {
     }
     fn ensure_group(&mut self, group: Group) -> Result<()> {
         if !self.hooks.contains_key(&group) {
-            let variants = group.variants();
+            let variants = &self.config.groups[&format!("{group:?}")];
             let recipes: Vec<_> = variants
                 .iter()
                 .map(|v| Recipe {
-                    pattern: v.pattern,
+                    pattern: &v.pattern,
                     offset: v.offset,
                     original: &[],
                     replacement: &[],
                 })
                 .collect();
             let (address, index) = self.locate(&recipes)?;
-            let expected = Pattern::parse(variants[index].original)?;
+            let expected = Pattern::parse(&variants[index].original)?;
             let original = self.process.read(address, expected.0.len())?;
             if expected.matches(&original) != [0] {
                 return Err("目标原指令不匹配".into());
             }
             hooks::validate_original(group, &original)?;
-            if let Some(pattern) = group.layout_pattern() {
+            if let Some(pattern) = self.config.layouts.get(&format!("{group:?}")) {
                 if self.scan(&Pattern::parse(pattern)?)?.len() != 1 {
                     return Err("游戏字段布局校验失败，此版本暂不支持".into());
                 }
@@ -655,14 +629,22 @@ impl Session {
             self.check_cancel()?;
             let cave = self.process.allocate_near(address)?;
             let initialize = (|| {
-                let code = hooks::build(group, &original, cave, address + original.len())?;
+                let code = hooks::build_configured(
+                    group,
+                    &original,
+                    cave,
+                    address + original.len(),
+                    &self.config,
+                )?;
                 if code.len() > 0x1000 {
                     return Err("适配代码超出分配范围".into());
                 }
                 self.process.write(cave, &code)?;
                 if group == Group::Bond {
-                    self.process
-                        .write(cave + 0x1104, &9999999f32.to_le_bytes())?;
+                    self.process.write(
+                        cave + 0x1104,
+                        &(self.config.limits["bond"] as f32).to_le_bytes(),
+                    )?;
                 }
                 self.process.protect(cave, 0x1000, PAGE_EXECUTE_READ)?;
                 self.process.flush(cave, code.len())?;
@@ -739,7 +721,7 @@ impl Session {
         Ok(())
     }
     fn apply_stat(&mut self, id: &str, value: i32) -> Result<()> {
-        let writes = hooks::stat_writes(id, value)?;
+        let writes = self.config.stat_writes(id, value)?;
         self.ensure_group(Group::Stats)?;
         self.check_cancel()?;
         let cave = self.hooks[&Group::Stats].cave;
@@ -758,7 +740,11 @@ impl Session {
             if pointer < 0x10000 || pointer > 0x00007fff_ffffe000 || captured_id == 0 {
                 return Err("尚未读取到有效数码宝贝，请重新打开属性界面".into());
             }
-            if self.process.read(pointer + 4, 4)? != captured_id.to_le_bytes() {
+            if self
+                .process
+                .read(pointer + self.config.fields["object_id"] as usize, 4)?
+                != captured_id.to_le_bytes()
+            {
                 return Err("数码宝贝对象已变化，请重新打开属性界面".into());
             }
             let originals: Result<Vec<_>> = writes
@@ -957,11 +943,22 @@ fn relative_jump(from: usize, to: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn money_code(base: usize, return_address: usize) -> Result<Vec<u8>> {
+    money_code_configured(base, return_address, &super::config::Execution::default())
+}
+fn money_code_configured(
+    base: usize,
+    return_address: usize,
+    config: &super::config::Execution,
+) -> Result<Vec<u8>> {
     // Preserve flags and rdx, update the two requested fields, replay original addsd.
     // Parameters occupy a separate RW page; the instruction page is RX.
     let mut code = vec![0x9c, 0x52]; // pushfq; push rdx
-    for (parameter, field) in [(base + 0x1000, 0x58), (base + 0x1004, 0x5c)] {
+    for (parameter, field) in [
+        (base + 0x1000, config.fields["money"] as u8),
+        (base + 0x1004, config.fields["agent_points"] as u8),
+    ] {
         code.extend_from_slice(&[0x8b, 0x15]); // mov edx, [rip+disp32]
         let displacement = i32::try_from(parameter as i128 - (base + code.len() + 4) as i128)
             .map_err(|_| "参数超出范围")?;
@@ -996,7 +993,7 @@ mod tests {
             "scan_rate_wont_decrease",
             "battle_items_wont_decrease",
         ] {
-            for recipe in recipes(id) {
+            for recipe in recipes(&profile::builtin().execution, id) {
                 let handle =
                     unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, std::process::id()) }.unwrap();
                 let process = Process {
@@ -1018,6 +1015,7 @@ mod tests {
                 process.write(region, &bytes).unwrap();
                 process.protect(region, 0x1000, PAGE_EXECUTE_READ).unwrap();
                 let mut session = Session {
+                    config: Default::default(),
                     process,
                     sections: vec![(region, 0x1000)],
                     patches: BTreeMap::new(),
@@ -1091,6 +1089,7 @@ mod tests {
             replacement: relative_jump(region + 4, cave).unwrap(),
         };
         let mut session = Session {
+            config: Default::default(),
             process,
             sections: vec![],
             patches: BTreeMap::new(),
@@ -1251,6 +1250,7 @@ mod tests {
             replacement: relative_jump(region + 4, cave).unwrap(),
         };
         let mut session = Session {
+            config: Default::default(),
             process,
             sections: vec![(region, 11)],
             patches: BTreeMap::new(),

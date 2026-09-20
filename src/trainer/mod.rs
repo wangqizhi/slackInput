@@ -15,3 +15,5 @@ pub struct Target {
     pub generation: u64,
     pub created: u64,
 }
+
+mod config;

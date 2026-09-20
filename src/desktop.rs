@@ -152,7 +152,10 @@ unsafe fn tray_menu(hwnd: HWND) {
     ];
     for (i, label) in labels.iter().enumerate() {
         let wide: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
-        let flags = if (i == 1 && !paused) || (i == 3 && startup.is_err()) {
+        let flags = if (app_state().lock().unwrap().features_locked() && (1..=3).contains(&i))
+            || (i == 1 && !paused)
+            || (i == 3 && startup.is_err())
+        {
             MF_STRING | MF_GRAYED
         } else if i == 3 && matches!(startup, Ok(true)) {
             MF_STRING | MF_CHECKED
@@ -176,6 +179,12 @@ unsafe fn tray_menu(hwnd: HWND) {
         )
         .0;
         let _ = DestroyMenu(menu);
+        let command = if (2..=4).contains(&command) && app_state().lock().unwrap().features_locked()
+        {
+            0
+        } else {
+            command
+        };
         match command {
             1 => restore(),
             2 => {
@@ -372,7 +381,14 @@ fn update_ring(
         let pid = state
             .bound_process
             .as_ref()
-            .filter(|p| should_show(state.config.focus_enabled, true, p.paused, p.exited()))
+            .filter(|p| {
+                should_show(
+                    state.config.focus_enabled && !state.features_locked(),
+                    true,
+                    p.paused,
+                    p.exited(),
+                )
+            })
             .map(|p| p.pid);
         (state.config.clone(), pid)
     };

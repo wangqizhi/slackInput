@@ -1,7 +1,7 @@
 use super::{
     Target,
     native::Session,
-    profile::{self, Profile, Repository},
+    profile::{self, ImportDraft, Profile, Repository, StaticImporter},
 };
 use std::{
     collections::BTreeMap,
@@ -29,11 +29,20 @@ enum Command {
     StopAll {
         exit: bool,
     },
+    Analyze {
+        epoch: u64,
+    },
+    DismissDraft,
+    Save {
+        epoch: u64,
+        profile: Box<Profile>,
+    },
     Shutdown,
 }
 
 #[derive(Default, Clone)]
 pub struct Snapshot {
+    pub draft: Option<ImportDraft>,
     pub epoch: u64,
     pub target: Option<Target>,
     pub profile: Option<Profile>,
@@ -60,13 +69,15 @@ impl Worker {
         let cancel = Arc::new(AtomicU64::new(0));
         let token = cancel.clone();
         let thread = thread::spawn(move || run(commands, updates, token, Repository { directory }));
-        Self {
+        let mut worker = Self {
             sender,
             receiver,
             cancel,
             thread: Some(thread),
             state: Snapshot::default(),
-        }
+        };
+        worker.bind(None);
+        worker
     }
     pub fn bind(&mut self, target: Option<Target>) {
         let epoch = self.cancel.fetch_add(1, Ordering::AcqRel) + 1;
@@ -87,6 +98,24 @@ impl Worker {
         self.state.busy = true;
         self.state.exit_ready = false;
         let _ = self.sender.send(Command::StopAll { exit });
+    }
+    pub fn dismiss_draft(&mut self) {
+        self.state.draft = None;
+        self.state.busy = true;
+        let _ = self.sender.send(Command::DismissDraft);
+    }
+    pub fn analyze(&mut self) {
+        self.state.busy = true;
+        let _ = self.sender.send(Command::Analyze {
+            epoch: self.state.epoch,
+        });
+    }
+    pub fn save(&mut self, profile: Profile) {
+        self.state.busy = true;
+        let _ = self.sender.send(Command::Save {
+            epoch: self.state.epoch,
+            profile: Box::new(profile),
+        });
     }
     pub fn poll(&mut self) {
         while let Ok(state) = self.receiver.try_recv() {
@@ -119,6 +148,22 @@ fn run(
     let mut state = Snapshot::default();
     let mut session: Option<Session> = None;
     loop {
+        // Stop existing effects even when the trainer window is closed.
+        if crate::app_state().lock().unwrap().features_locked() && session.is_some() {
+            let result = session.as_mut().unwrap().cleanup();
+            if let Err(error) = result {
+                state.cleanup_failed = true;
+                state.error = true;
+                state.message = format!("反作弊限制：恢复修改失败：{error}");
+            } else {
+                session = None;
+                state.active.clear();
+                state.applied.clear();
+                state.cleanup_failed = false;
+                state.message = "检测到反作弊进程，修改器已停用".into();
+            }
+            let _ = updates.send(state.clone());
+        }
         let command = match commands.recv_timeout(Duration::from_millis(200)) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -139,11 +184,11 @@ fn run(
         let result: Result<(), String> = (|| {
             match command {
                 Command::Bind { target, epoch } => {
-                    if let Some(old) = &mut session {
-                        if let Err(e) = old.cleanup() {
-                            state.cleanup_failed = true;
-                            return Err(format!("旧进程的修改未能全部恢复，请重试停用全部：{e}"));
-                        }
+                    if let Some(old) = &mut session
+                        && let Err(e) = old.cleanup()
+                    {
+                        state.cleanup_failed = true;
+                        return Err(format!("旧进程的修改未能全部恢复，请重试停用全部：{e}"));
                     }
                     session = None;
                     state = Snapshot {
@@ -154,14 +199,67 @@ fn run(
                     if let Some(target) = target {
                         state.profile = repository.resolve(&target.name)?;
                         state.message = if state.profile.is_some() {
-                            "已加载 40 项修改适配，默认关闭；实际效果请在游戏中确认"
+                            "已加载修改器配置，默认关闭；实际效果请在游戏中确认"
                         } else {
                             "当前进程没有匹配的修改器配置"
                         }
                         .into();
                     } else {
-                        state.message = "请先绑定游戏进程".into();
+                        state.profile = repository.resolve(profile::GAME_PROCESS)?;
+                        state.message = "可管理配置；启用功能请先绑定游戏进程".into();
                     }
+                }
+                Command::DismissDraft => {
+                    state.draft = None;
+                }
+                Command::Analyze { epoch } => {
+                    if epoch != cancel.load(Ordering::Acquire) {
+                        return Err("绑定已变化".into());
+                    }
+                    state.draft = None;
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("修改器 EXE", &["exe"])
+                        .pick_file()
+                    {
+                        use std::io::Read;
+                        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                        let mut bytes = Vec::new();
+                        file.take(32 * 1024 * 1024 + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(|e| e.to_string())?;
+                        let draft = profile::SampleImporter.analyze(&bytes)?;
+                        draft.profile.validate()?;
+                        if let Some(target) = &state.target
+                            && !draft.profile.matches_process(&target.name)
+                        {
+                            return Err("导入配置与已绑定游戏不匹配".into());
+                        }
+                        state.draft = Some(draft);
+                        state.message = "请选择同名项覆盖或跳过，然后确认导入".into();
+                    }
+                }
+                Command::Save { epoch, profile } => {
+                    if epoch != state.epoch || epoch != cancel.load(Ordering::Acquire) {
+                        return Err("绑定已变化，请重新操作".into());
+                    }
+                    profile.validate()?;
+                    if let Some(target) = &state.target
+                        && !profile.matches_process(&target.name)
+                    {
+                        return Err("配置与绑定进程不匹配".into());
+                    }
+                    if let Some(old) = &mut session
+                        && let Err(e) = old.cleanup()
+                    {
+                        state.cleanup_failed = true;
+                        return Err(e);
+                    }
+                    session = None;
+                    state.cleanup_failed = false;
+                    repository.save(&profile)?;
+                    state.profile = Some(*profile);
+                    state.draft = None;
+                    state.message = "配置已保存，所有修改项保持关闭".into();
                 }
                 Command::Set {
                     epoch,
@@ -186,6 +284,9 @@ fn run(
                         return Err("该功能待适配，尚不能启用".into());
                     }
                     if enabled {
+                        if crate::app_state().lock().unwrap().features_locked() {
+                            return Err("检测到反作弊进程，修改器已锁定".into());
+                        }
                         if let Some(v) = value {
                             feature.parse_value(&v.to_string())?;
                         }
@@ -210,6 +311,7 @@ fn run(
                         }
                     }
                     if let Some(session) = &mut session {
+                        session.config = profile.execution.clone();
                         if let Err(e) = session.set(&id, value, enabled) {
                             // A failed write can leave a journal entry even if no UI
                             // toggle was confirmed. Keep the session for cleanup.
@@ -227,11 +329,11 @@ fn run(
                     .into();
                 }
                 Command::StopAll { exit } => {
-                    if let Some(s) = &mut session {
-                        if let Err(e) = s.cleanup() {
-                            state.cleanup_failed = true;
-                            return Err(e);
-                        }
+                    if let Some(s) = &mut session
+                        && let Err(e) = s.cleanup()
+                    {
+                        state.cleanup_failed = true;
+                        return Err(e);
                     }
                     state.cleanup_failed = false;
                     state.exit_ready = exit;
@@ -262,5 +364,64 @@ fn run(
         if shutdown {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn serialized_save_rejects_stale_epoch_and_reloads_empty_catalog() {
+        let directory = std::env::temp_dir().join(format!("trainer-worker-{}", std::process::id()));
+        let repo = Repository {
+            directory: directory.clone(),
+        };
+        let (send, commands) = mpsc::channel();
+        let (updates, recv) = mpsc::channel();
+        let cancel = Arc::new(AtomicU64::new(1));
+        let token = cancel.clone();
+        let thread = thread::spawn(move || run(commands, updates, token, repo));
+        send.send(Command::Bind {
+            target: None,
+            epoch: 1,
+        })
+        .unwrap();
+        let initial = recv.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(initial.profile.as_ref().unwrap().features.len(), 40);
+        let mut empty = initial.profile.unwrap();
+        empty.features.clear();
+        send.send(Command::Save {
+            epoch: 0,
+            profile: Box::new(empty.clone()),
+        })
+        .unwrap();
+        assert!(recv.recv_timeout(Duration::from_secs(5)).unwrap().error);
+        send.send(Command::Save {
+            epoch: 1,
+            profile: Box::new(empty),
+        })
+        .unwrap();
+        let saved = recv.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(!saved.error);
+        assert!(saved.active.is_empty());
+        assert!(saved.profile.unwrap().features.is_empty());
+        cancel.store(2, Ordering::Release);
+        send.send(Command::Bind {
+            target: None,
+            epoch: 2,
+        })
+        .unwrap();
+        assert!(
+            recv.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .profile
+                .unwrap()
+                .features
+                .is_empty()
+        );
+        send.send(Command::Shutdown).unwrap();
+        thread.join().unwrap();
+        std::fs::remove_file(directory.join(format!("{}.json", profile::builtin().id))).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

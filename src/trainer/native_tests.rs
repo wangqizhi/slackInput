@@ -12,7 +12,7 @@ fn local_process() -> Process {
 }
 
 fn original(group: Group, variant: usize) -> Vec<u8> {
-    let mut bytes: Vec<_> = Pattern::parse(group.variants()[variant].original)
+    let mut bytes: Vec<_> = Pattern::parse(&group.variants()[variant].original)
         .unwrap()
         .0
         .into_iter()
@@ -317,7 +317,7 @@ fn synthetic_session(group: Group, variant: usize) -> (Session, usize, Vec<u8>) 
     } as usize;
     assert_ne!(region, 0);
     let recipe = &group.variants()[variant];
-    let mut bytes: Vec<_> = Pattern::parse(recipe.pattern)
+    let mut bytes: Vec<_> = Pattern::parse(&recipe.pattern)
         .unwrap()
         .0
         .into_iter()
@@ -327,7 +327,7 @@ fn synthetic_session(group: Group, variant: usize) -> (Session, usize, Vec<u8>) 
     bytes[recipe.offset..recipe.offset + instructions.len()].copy_from_slice(&instructions);
     process.write(region, &bytes).unwrap();
     if let Some(layout) = group.layout_pattern() {
-        let layout: Vec<_> = Pattern::parse(layout)
+        let layout: Vec<_> = Pattern::parse(&layout)
             .unwrap()
             .0
             .into_iter()
@@ -338,6 +338,7 @@ fn synthetic_session(group: Group, variant: usize) -> (Session, usize, Vec<u8>) 
     process.protect(region, 0x1000, PAGE_EXECUTE_READ).unwrap();
     (
         Session {
+            config: Default::default(),
             process,
             sections: vec![(region, 0x1000)],
             patches: BTreeMap::new(),
@@ -444,7 +445,7 @@ fn all_thirteen_stat_writes_require_valid_capture_and_apply_once() {
         .process
         .write(cave + 0x1008, &1234u32.to_le_bytes())
         .unwrap();
-    for (id, _) in hooks::STATS {
+    for id in hooks::STATS {
         session.set(id, Some(55.0), true).unwrap();
         assert_eq!(session.applied[*id], (55.0, 1234));
         for (offset, expected) in hooks::stat_writes(id, 55).unwrap() {
@@ -478,6 +479,34 @@ fn all_thirteen_stat_writes_require_valid_capture_and_apply_once() {
             .unwrap_err()
             .contains("属性界面")
     );
+    session.cleanup().unwrap();
+    drop(session);
+    unsafe { VirtualFreeEx(GetCurrentProcess(), region as _, 0, MEM_RELEASE) }.unwrap();
+    unsafe { VirtualFreeEx(GetCurrentProcess(), cave as _, 0, MEM_RELEASE) }.unwrap();
+}
+
+#[test]
+fn configured_stat_offset_and_scale_drive_real_memory_write() {
+    let (mut session, region, _) = synthetic_session(Group::Stats, 0);
+    let stat = session.config.stats.get_mut("e_digimon_level").unwrap();
+    stat.offsets = vec![0x80];
+    stat.scale = 3;
+    session.config.validate().unwrap();
+    assert!(session.set("e_digimon_level", Some(7.0), true).is_err());
+    let cave = session.hooks[&Group::Stats].cave;
+    let mut data = [0u8; 512];
+    put(&mut data, 4, 1234);
+    session
+        .process
+        .write(cave + 0x1000, &(data.as_mut_ptr() as u64).to_le_bytes())
+        .unwrap();
+    session
+        .process
+        .write(cave + 0x1008, &1234u32.to_le_bytes())
+        .unwrap();
+    session.set("e_digimon_level", Some(7.0), true).unwrap();
+    assert_eq!(get(&data, 0x80), 21);
+    assert_eq!(get(&data, 0x68), 0);
     session.cleanup().unwrap();
     drop(session);
     unsafe { VirtualFreeEx(GetCurrentProcess(), region as _, 0, MEM_RELEASE) }.unwrap();

@@ -1,0 +1,342 @@
+{
+  "address_resolution": "main_module_unique_aob",
+  "groups": {
+    "Battle": [
+      {
+        "pattern": "83 BF * * 00 00 01 0F 85 * * 00 00 * 8D * * * 00 00 E8",
+        "offset": 0,
+        "original": "83 BF * * 00 00 01"
+      }
+    ],
+    "Cp": [
+      {
+        "pattern": "0F B6 81 A0 01 00 00 88 * 8B 81 A4 01 00 00 89 * 04 8B",
+        "offset": 0,
+        "original": "0F B6 81 A0 01 00 00"
+      },
+      {
+        "pattern": "41 0F B6 85 A0 01 00 00 88 * * 8B * * * 00 00 89",
+        "offset": 0,
+        "original": "41 0F B6 85 A0 01 00 00"
+      }
+    ],
+    "Scan": [
+      {
+        "pattern": "44 8B 43 08 48 8B CE * * E8 * * * * * 83 * * * * * 75",
+        "offset": 0,
+        "original": "44 8B 43 08 48 8B CE"
+      },
+      {
+        "pattern": "44 8B 43 08 8B 13 * * * E8 * * * * * 83 * * * * * 75",
+        "offset": 0,
+        "original": "44 8B 43 08 8B 13"
+      }
+    ],
+    "Damage": [
+      {
+        "pattern": "80 7A 24 00 * 8B * * 8B * 0F 85 * * 00 00",
+        "offset": 0,
+        "original": "80 7A 24 00 * 8B *"
+      },
+      {
+        "pattern": "80 7A 24 00 48 89 D6 49 89 CF 0F 85 * * 00 00",
+        "offset": 0,
+        "original": "80 7A 24 00 48 89 D6"
+      }
+    ],
+    "Items": [
+      {
+        "pattern": "41 83 7F 0C 07 74 * * * * * * * * E8 * * * * 8B 50 0C 2B 50 10 * * * E8 * * * * 41 83 BE E0 00 00 00 04 74",
+        "offset": 19,
+        "original": "8B 50 0C 2B 50 10"
+      }
+    ],
+    "Rewards": [
+      {
+        "pattern": "49 8D 7F 40 44 8B E0 * 8B",
+        "offset": 0,
+        "original": "49 8D 7F 40 44 8B E0"
+      },
+      {
+        "pattern": "44 8B E8 49 8D 77 40",
+        "offset": 0,
+        "original": "44 8B E8 49 8D 77 40"
+      }
+    ],
+    "Evolution": [
+      {
+        "pattern": "0F 85 * * 00 00 8B 42 04 85 C0 74 * * 88",
+        "offset": 6,
+        "original": "8B 42 04 85 C0"
+      }
+    ],
+    "Bond": [
+      {
+        "pattern": "0F 57 FF 0F 2E F7 7A * 0F 84 * * 00 00 E8 * * * * * * * * 85 * 75",
+        "offset": 0,
+        "original": "0F 57 FF 0F 2E F7"
+      }
+    ],
+    "CardRewards": [
+      {
+        "pattern": "39 83 * * 00 00 7E * 89 * * * 00 00 E8 * * * * * * * E8 * * * * * 8D",
+        "offset": 0,
+        "original": "39 83 * * 00 00"
+      }
+    ],
+    "CardWin": [
+      {
+        "pattern": "48 8B * * * 00 00 E8 * * * * * * * * * * * * * * * * * E8 * * * * 89 83 * * 00 00 E8 * * * * * * * E8 * * * * * 8D * * * 00 00",
+        "offset": 30,
+        "original": "89 83 * * 00 00"
+      }
+    ],
+    "Stats": [
+      {
+        "pattern": "89 * 24 * E8 * * * * 8B 47 78 BA 01 00 00 00",
+        "offset": 9,
+        "original": "8B 47 78 BA 01 00 00 00"
+      }
+    ]
+  },
+  "layouts": {
+    "Rewards": "E8 * * * * 41 01 * 60 01 00 00 * 8B * E8",
+    "Stats": "F3 0F 10 * 44 01 00 00 66 0F 6E * 0F 5B * F3 0F 5E"
+  },
+  "patches": {
+    "stealth_mode": [
+      {
+        "pattern": "48 8B * * * 00 00 * 85 * 75 07 32 C0 E9 * * 00 00 0F 57",
+        "offset": 10,
+        "original": [
+          117,
+          7,
+          50,
+          192
+        ],
+        "replacement": [
+          176,
+          1,
+          102,
+          144
+        ]
+      }
+    ],
+    "battle_items_wont_decrease": [
+      {
+        "pattern": "E8 * * * * 8B * * 85 * 0F 84 * * 00 00 80 * * * 00 00 00 0F 85 * * 00 00",
+        "offset": 10,
+        "original": [
+          15,
+          132
+        ],
+        "replacement": [
+          144,
+          233
+        ]
+      }
+    ],
+    "scan_rate_wont_decrease": [
+      {
+        "pattern": "66 44 89 66 02 E8 * * * * * 8D",
+        "offset": 0,
+        "original": [
+          102,
+          68,
+          137,
+          102,
+          2
+        ],
+        "replacement": [
+          15,
+          31,
+          68,
+          0,
+          0
+        ]
+      },
+      {
+        "pattern": "66 44 89 66 02 * 8D * * * E8",
+        "offset": 0,
+        "original": [
+          102,
+          68,
+          137,
+          102,
+          2
+        ],
+        "replacement": [
+          15,
+          31,
+          68,
+          0,
+          0
+        ]
+      }
+    ],
+    "money": [
+      {
+        "pattern": "F3 0F 5A * F2 0F 58 4B 50 F2 0F 11",
+        "offset": 4,
+        "original": [
+          242,
+          15,
+          88,
+          75,
+          80
+        ],
+        "replacement": []
+      },
+      {
+        "pattern": "F2 0F 58 4B 50 66 0F 2F * * * * * F2 0F 11",
+        "offset": 0,
+        "original": [
+          242,
+          15,
+          88,
+          75,
+          80
+        ],
+        "replacement": []
+      }
+    ]
+  },
+  "stats": {
+    "e_digimon_level": {
+      "offsets": [
+        104
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_exp": {
+      "offsets": [
+        108
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_current_hp": {
+      "offsets": [
+        116
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_current_sp": {
+      "offsets": [
+        120
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_max_hp_bonus": {
+      "offsets": [
+        180
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_max_sp_bonus": {
+      "offsets": [
+        184
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_atk_bonus": {
+      "offsets": [
+        188
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_def_bonus": {
+      "offsets": [
+        192
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_int_bonus": {
+      "offsets": [
+        196
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_spi_bonus": {
+      "offsets": [
+        200
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_spd_bonus": {
+      "offsets": [
+        204
+      ],
+      "scale": 1,
+      "float": false
+    },
+    "e_digimon_talent": {
+      "offsets": [
+        260,
+        264
+      ],
+      "scale": 1000,
+      "float": false
+    },
+    "e_digimon_bond": {
+      "offsets": [
+        324
+      ],
+      "scale": 100,
+      "float": true
+    }
+  },
+  "fields": {
+    "battle_team_delta": -4,
+    "battle_hp_delta": 8,
+    "battle_sp_delta": 16,
+    "cp_max": 464,
+    "cp_current": 420,
+    "scan_value": 8,
+    "damage_team": 12,
+    "damage_value": 12,
+    "item_kind": 224,
+    "item_category": 12,
+    "item_count": 12,
+    "reward_money": 352,
+    "reward_exp": 348,
+    "object_id": 4,
+    "money": 88,
+    "agent_points": 92
+  },
+  "limits": {
+    "battle": 99999,
+    "scan": 9999,
+    "damage": 99999,
+    "exp": 9999999,
+    "bond": 9999999,
+    "card_rewards": 99
+  },
+  "evolution_offsets": [
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28,
+    32,
+    36,
+    40,
+    44,
+    48,
+    52,
+    56,
+    60,
+    80
+  ]
+}

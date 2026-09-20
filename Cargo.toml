@@ -1,6 +1,6 @@
 [package]
 name = "SlackInput"
-version = "0.5.1"
+version = "0.6.1"
 edition = "2024"
 
 [dependencies]
@@ -9,6 +9,7 @@ raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+rfd = "0.15"
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm", "decoder", "block_encoder", "instr_info"] }
 
 [build-dependencies]
@@ -20,6 +21,7 @@ features = [
     "Gaming_Input",
     "Foundation_Collections",
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",

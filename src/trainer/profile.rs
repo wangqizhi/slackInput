@@ -21,6 +21,8 @@ pub struct Profile {
     pub source_sha256: String,
     pub source_version: String,
     pub features: Vec<Feature>,
+    #[serde(default)]
+    pub execution: super::config::Execution,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,6 +129,7 @@ impl Profile {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.execution.validate()?;
         if self.schema_version != 1
             || self.id.is_empty()
             || self.id.len() > 100
@@ -139,7 +142,6 @@ impl Profile {
         }
         if self.name.is_empty()
             || self.name.len() > 256
-            || self.features.is_empty()
             || self.features.len() > 256
             || self.process_names.is_empty()
             || self.process_names.len() > 16
@@ -188,28 +190,44 @@ impl Profile {
                 _ => {}
             }
         }
-        // Metadata may describe new games, but it cannot opt into native execution by
-        // claiming this adapter's identity with altered fields or process bindings.
         if self.id == builtin().id {
             let canonical = builtin();
-            if serde_json::to_value(self).map_err(|e| e.to_string())?
-                != serde_json::to_value(canonical).map_err(|e| e.to_string())?
-            {
-                return Err("内置适配器元数据不匹配，请勿修改其执行配置".into());
+            if self.process_names != canonical.process_names || self.source_sha256 != SAMPLE_HASH {
+                return Err("内置适配器进程或来源不匹配".into());
             }
+            for f in &self.features {
+                let original = canonical
+                    .features
+                    .iter()
+                    .find(|x| x.id == f.id)
+                    .ok_or("不支持的功能 ID")?;
+                if serde_json::to_value(&f.input).unwrap()
+                    != serde_json::to_value(&original.input).unwrap()
+                {
+                    return Err("适配器输入契约不匹配".into());
+                }
+            }
+        }
+        let mut names = HashSet::new();
+        if self
+            .features
+            .iter()
+            .any(|f| name_key(&f.name).is_empty() || !names.insert(name_key(&f.name)))
+        {
+            return Err("功能名称为空或重复".into());
         }
         Ok(())
     }
 }
 
-/// Future import button: analyze -> review draft -> install -> resolve by process.
+/// Static analysis -> review draft -> save -> resolve by process.
 /// No process or executable is started by this interface.
-#[allow(dead_code)] // Public extension seam; the import button is a later milestone.
 pub trait StaticImporter {
     fn analyze(&self, bytes: &[u8]) -> Result<ImportDraft, String>;
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub struct ImportDraft {
     pub profile: Profile,
     pub warnings: Vec<String>,
@@ -242,21 +260,24 @@ impl Repository {
     pub fn resolve(&self, process: &str) -> Result<Option<Profile>, String> {
         let embedded = builtin();
         if embedded.matches_process(process) {
-            return Ok(Some(embedded));
+            let path = self.directory.join(format!("{}.json", embedded.id));
+            if !path.exists() {
+                self.save(&embedded)?;
+            }
         }
         if !self.directory.exists() {
             return Ok(None);
         }
         let mut found = None;
-        for entry in fs::read_dir(&self.directory)
-            .map_err(|e| e.to_string())?
-            .take(257)
-        {
+        for entry in fs::read_dir(&self.directory).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
             let p = read_profile(&path)?;
+            if path.file_stem().and_then(|s| s.to_str()) != Some(p.id.as_str()) {
+                return Err("配置文件名必须与 ID 一致".into());
+            }
             if p.matches_process(process) {
                 if found.is_some() {
                     return Err("存在多个匹配修改器，请先解决配置冲突".into());
@@ -265,6 +286,46 @@ impl Repository {
             }
         }
         Ok(found)
+    }
+
+    pub fn save(&self, profile: &Profile) -> Result<PathBuf, String> {
+        profile.validate()?;
+        fs::create_dir_all(&self.directory).map_err(|e| e.to_string())?;
+        let target = self.directory.join(format!("{}.json", profile.id));
+        let temp = target.with_extension("pending");
+        let bytes = serde_json::to_vec_pretty(profile).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > MAX_PROFILE {
+            return Err("配置过大".into());
+        }
+        use std::io::Write;
+        let result = (|| {
+            let mut file = fs::File::create(&temp).map_err(|e| e.to_string())?;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            drop(file);
+            use std::os::windows::ffi::OsStrExt;
+            use windows::{
+                Win32::Storage::FileSystem::{
+                    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+                },
+                core::PCWSTR,
+            };
+            let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe {
+                MoveFileExW(
+                    PCWSTR(from.as_ptr()),
+                    PCWSTR(to.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(|e| e.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result?;
+        Ok(target)
     }
 
     /// Never overwrite an existing profile implicitly. Caller owns review/update UX.
@@ -378,5 +439,244 @@ mod tests {
         let mut altered = bytes;
         altered[200] ^= 1;
         assert!(SampleImporter.analyze(&altered).is_err());
+    }
+}
+
+pub fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+pub fn merge(
+    current: &Profile,
+    incoming: &Profile,
+    overwrite: &HashSet<String>,
+) -> Result<Profile, String> {
+    current.validate()?;
+    incoming.validate()?;
+    if current.id != incoming.id || current.process_names != incoming.process_names {
+        return Err("不同游戏配置不能合并".into());
+    }
+    let mut result = current.clone();
+    let mut selected = HashSet::new();
+    for feature in &incoming.features {
+        let key = name_key(&feature.name);
+        if let Some(index) = result
+            .features
+            .iter()
+            .position(|f| name_key(&f.name) == key)
+        {
+            if overwrite.contains(&key) {
+                result.features[index] = feature.clone();
+                selected.insert(feature.id.clone());
+            }
+        } else {
+            result.features.push(feature.clone());
+            selected.insert(feature.id.clone());
+        }
+    }
+    let retained: Vec<_> = current
+        .features
+        .iter()
+        .filter(|f| !selected.contains(&f.id))
+        .collect();
+    if !selected.is_empty() {
+        let old = &current.execution;
+        let new = &incoming.execution;
+        if old.fields != new.fields
+            || old.limits != new.limits
+            || old.evolution_offsets != new.evolution_offsets
+        {
+            if !retained.is_empty() {
+                return Err("共享字段因子不同，请全部覆盖或保留现有配置".into());
+            }
+            result.execution.fields = new.fields.clone();
+            result.execution.limits = new.limits.clone();
+            result.execution.evolution_offsets = new.evolution_offsets.clone();
+        }
+        for id in &selected {
+            if let Some(stat) = new.stats.get(id) {
+                result.execution.stats.insert(id.clone(), stat.clone());
+            }
+            let patch_id = if id == "agent_points" {
+                "money"
+            } else {
+                id.as_str()
+            };
+            if let Some(patches) = new.patches.get(patch_id) {
+                if patch_id == "money"
+                    && retained
+                        .iter()
+                        .any(|f| matches!(f.id.as_str(), "money" | "agent_points"))
+                    && serde_json::to_value(&old.patches[patch_id]).unwrap()
+                        != serde_json::to_value(patches).unwrap()
+                {
+                    return Err("金钱和点数共享定位已变化，请一并覆盖".into());
+                }
+                result
+                    .execution
+                    .patches
+                    .insert(patch_id.into(), patches.clone());
+            }
+            if let Some(group) = super::hooks::group(id) {
+                let key = format!("{group:?}");
+                let changed = serde_json::to_value(&old.groups[&key]).unwrap()
+                    != serde_json::to_value(&new.groups[&key]).unwrap()
+                    || old.layouts.get(&key) != new.layouts.get(&key);
+                if changed
+                    && retained
+                        .iter()
+                        .any(|f| super::hooks::group(&f.id) == Some(group))
+                {
+                    return Err(format!("{key} 共享定位已变化，请同时覆盖同组功能"));
+                }
+                result
+                    .execution
+                    .groups
+                    .insert(key.clone(), new.groups[&key].clone());
+                if let Some(layout) = new.layouts.get(&key) {
+                    result.execution.layouts.insert(key, layout.clone());
+                }
+            }
+        }
+    }
+    result.validate()?;
+    Ok(result)
+}
+
+/// AI drafts must pass validation and the same human review flow as EXE imports.
+#[allow(dead_code)]
+pub struct AiRequest {
+    pub instruction: String,
+    pub current: Profile,
+}
+#[allow(dead_code)]
+pub trait AiDraftProvider {
+    fn propose(&self, request: &AiRequest) -> Result<ImportDraft, String>;
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::*;
+    #[test]
+    fn names_merge_mixed_all_skip_and_all_overwrite() {
+        let mut current = builtin();
+        current.features.truncate(2);
+        let mut incoming = builtin();
+        incoming.features.truncate(3);
+        incoming.features[0].name = format!("  {}  ", current.features[0].name);
+        for f in &mut incoming.features {
+            f.description = "updated".into();
+        }
+        let skipped = merge(&current, &incoming, &HashSet::new()).unwrap();
+        assert_eq!(skipped.features.len(), 3);
+        assert_eq!(
+            skipped.features[0].description,
+            current.features[0].description
+        );
+        let mixed = merge(
+            &current,
+            &incoming,
+            &HashSet::from([name_key(&incoming.features[0].name)]),
+        )
+        .unwrap();
+        assert_eq!(mixed.features[0].description, "updated");
+        assert_eq!(
+            mixed.features[1].description,
+            current.features[1].description
+        );
+        let all = merge(
+            &current,
+            &incoming,
+            &incoming
+                .features
+                .iter()
+                .map(|f| name_key(&f.name))
+                .collect(),
+        )
+        .unwrap();
+        assert!(all.features.iter().all(|f| f.description == "updated"));
+        assert_eq!(name_key("  MONEY "), name_key("money"));
+        incoming.features[0].name = "different name same id".into();
+        assert!(merge(&current, &incoming, &HashSet::new()).is_err());
+    }
+    #[test]
+    fn deletion_and_changed_factors_survive_atomic_replace_and_empty_reload() {
+        let directory = std::env::temp_dir().join(format!("trainer-delete-{}", std::process::id()));
+        let repo = Repository {
+            directory: directory.clone(),
+        };
+        let mut p = repo.resolve(GAME_PROCESS).unwrap().unwrap();
+        p.features.remove(0);
+        p.execution
+            .stats
+            .get_mut("e_digimon_level")
+            .unwrap()
+            .offsets = vec![128];
+        repo.save(&p).unwrap();
+        let loaded = repo.resolve(GAME_PROCESS).unwrap().unwrap();
+        assert_eq!(loaded.features.len(), 39);
+        assert_eq!(
+            loaded.execution.stat_writes("e_digimon_level", 7).unwrap(),
+            vec![(128, 7i32.to_le_bytes())]
+        );
+        p.features.clear();
+        let path = repo.save(&p).unwrap();
+        assert!(
+            repo.resolve(GAME_PROCESS)
+                .unwrap()
+                .unwrap()
+                .features
+                .is_empty()
+        );
+        let mut invalid = p.clone();
+        invalid.execution.groups.clear();
+        assert!(repo.save(&invalid).is_err());
+        assert!(
+            repo.resolve(GAME_PROCESS)
+                .unwrap()
+                .unwrap()
+                .features
+                .is_empty()
+        );
+        fs::write(&path, b"broken JSON").unwrap();
+        assert!(repo.resolve(GAME_PROCESS).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    fn shared_factors_cannot_silently_change_skipped_options() {
+        let current = builtin();
+        let mut incoming = current.clone();
+        incoming.execution.fields.insert("cp_current".into(), 424);
+        let mixed = HashSet::from([name_key(&incoming.features[0].name)]);
+        assert!(merge(&current, &incoming, &mixed).is_err());
+        let all = incoming
+            .features
+            .iter()
+            .map(|f| name_key(&f.name))
+            .collect();
+        assert_eq!(
+            merge(&current, &incoming, &all).unwrap().execution.fields["cp_current"],
+            424
+        );
+        assert_eq!(
+            merge(&current, &incoming, &HashSet::new())
+                .unwrap()
+                .execution
+                .fields["cp_current"],
+            420
+        );
+    }
+    #[test]
+    fn invalid_factors_and_duplicate_names_rejected() {
+        let mut p = builtin();
+        p.features[1].name = p.features[0].name.clone();
+        assert!(p.validate().is_err());
+        let mut c = super::super::config::Execution::default();
+        c.groups.get_mut("Battle").unwrap()[0].pattern = "* * *".into();
+        assert!(c.validate().is_err());
+        let mut c = super::super::config::Execution::default();
+        c.stats.get_mut("e_digimon_level").unwrap().scale = i32::MAX;
+        assert!(c.stat_writes("e_digimon_level", 2).is_err());
     }
 }
