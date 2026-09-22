@@ -73,6 +73,8 @@ static LAST_TRIGGER_AT: OnceLock<Mutex<Instant>> = OnceLock::new();
 #[derive(Clone)]
 struct AppConfig {
     keyboard_trigger: String,
+    speed_up: String,
+    speed_down: String,
     mapping_text: String,
     capture_enabled: bool,
     debug_logging: bool,
@@ -148,6 +150,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             keyboard_trigger: String::new(),
+            speed_up: "NumAdd".into(),
+            speed_down: "NumSubtract".into(),
             mapping_text: "Ctrl+Win+Left".to_string(),
             capture_enabled: true,
             debug_logging: false,
@@ -342,8 +346,8 @@ impl AppState {
                 anti_cheat::Outcome::Unavailable(_) => {}
             }
             if self.anti_cheat_locked {
-                if let Some(process) = self.bound_process.as_mut().filter(|p| p.paused) {
-                    if let Err(error) = process.resume() {
+                if let Some(process) = self.bound_process.as_mut() {
+                    if let Err(error) = process.restore() {
                         self.status = format!(
                             "{}: {error}",
                             game_text(
@@ -392,10 +396,12 @@ impl AppState {
 struct MapperApp {
     macros: macros::Editor,
     trainer: trainer::TrainerUi,
-    shortcut_capture: Option<bool>,
+    shortcut_capture: Option<usize>,
     captured_shortcut: Option<String>,
     settings_tab: usize,
     keyboard_trigger_input: String,
+    speed_up_input: String,
+    speed_down_input: String,
     mapping_input: String,
     capture_enabled: bool,
     debug_logging: bool,
@@ -463,6 +469,8 @@ impl MapperApp {
             captured_shortcut: None,
             settings_tab: 0,
             keyboard_trigger_input: config.keyboard_trigger.clone(),
+            speed_up_input: config.speed_up.clone(),
+            speed_down_input: config.speed_down.clone(),
             selected_preset: preset_index(&config.mapping_text).unwrap_or(0),
             mapping_input: config.mapping_text,
             capture_enabled: config.capture_enabled,
@@ -479,7 +487,7 @@ impl MapperApp {
             #[cfg(debug_assertions)]
             snapshot_frames: 0,
         };
-        if let Err(error) = configure_keyboard(&config.keyboard_trigger) {
+        if let Err(error) = configure_shortcuts(&config.keyboard_trigger, &config.speed_up, &config.speed_down) {
             set_status(&error);
         }
         app.refresh_processes();
@@ -525,13 +533,15 @@ impl MapperApp {
             push_log_force(text.invalid_hotkey);
             return;
         };
-        if let Err(error) = configure_keyboard(self.keyboard_trigger_input.trim()) {
+        if let Err(error) = configure_shortcuts(self.keyboard_trigger_input.trim(), self.speed_up_input.trim(), self.speed_down_input.trim()) {
             set_status(&error);
             return;
         }
 
         let config = AppConfig {
             keyboard_trigger: self.keyboard_trigger_input.trim().to_string(),
+            speed_up: self.speed_up_input.trim().to_string(),
+            speed_down: self.speed_down_input.trim().to_string(),
             mapping_text: mapping_text.clone(),
             capture_enabled: self.capture_enabled,
             debug_logging: self.debug_logging,
@@ -643,12 +653,26 @@ impl MapperApp {
     }
 
     fn update_shortcut_capture(&mut self, ctx: &egui::Context) {
-        let Some(mapping) = self.shortcut_capture else {
+        let Some(target) = self.shortcut_capture else {
             return;
         };
         if !ctx.input(|input| input.focused) || self.settings_tab != 3 {
             self.stop_shortcut_capture();
             return;
+        }
+        if self.captured_shortcut.is_none() {
+            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+            let held = |vk| unsafe { GetAsyncKeyState(vk) < 0 };
+            let name = if held(0x6B) { Some("NumAdd") } else if held(0x6D) { Some("NumSubtract") } else { None };
+            if let Some(name) = name {
+                let mut parts = Vec::new();
+                if held(0x11) { parts.push("Ctrl"); }
+                if held(0x12) { parts.push("Alt"); }
+                if held(0x10) { parts.push("Shift"); }
+                if held(0x5B) || held(0x5C) { parts.push("Win"); }
+                parts.push(name);
+                self.captured_shortcut = Some(parts.join("+"));
+            }
         }
         ctx.input_mut(|input| {
             for event in &input.events {
@@ -683,24 +707,29 @@ impl MapperApp {
         }) && ctx.input(|input| input.keys_down.is_empty() && input.modifiers.is_none())
         {
             let value = self.captured_shortcut.take().unwrap();
-            if mapping {
+            if target == 0 {
                 self.selected_preset = preset_index(&value).unwrap_or(self.selected_preset);
                 self.mapping_input = value;
             } else {
-                self.keyboard_trigger_input = value;
+                match target {
+                    1 => self.keyboard_trigger_input = value,
+                    2 => self.speed_up_input = value,
+                    _ => self.speed_down_input = value,
+                }
             }
             self.stop_shortcut_capture();
         }
     }
 
-    fn shortcut_input_row(&mut self, ui: &mut egui::Ui, mapping: bool) {
-        let capturing = self.shortcut_capture == Some(mapping);
+    fn shortcut_input_row(&mut self, ui: &mut egui::Ui, target: usize) {
+        let capturing = self.shortcut_capture == Some(target);
         ui.horizontal(|ui| {
             let width = (ui.available_width() - 184.0).max(80.0);
-            let value = if mapping {
-                &mut self.mapping_input
-            } else {
-                &mut self.keyboard_trigger_input
+            let value = match target {
+                0 => &mut self.mapping_input,
+                1 => &mut self.keyboard_trigger_input,
+                2 => &mut self.speed_up_input,
+                _ => &mut self.speed_down_input,
             };
             ui.add_enabled(
                 self.shortcut_capture.is_none(),
@@ -723,9 +752,9 @@ impl MapperApp {
                     self.stop_shortcut_capture();
                 }
                 if !capturing {
-                    match keyboard::configure(None) {
+                    match keyboard::configure_all([None; 3]) {
                         Ok(()) => {
-                            self.shortcut_capture = Some(mapping);
+                            self.shortcut_capture = Some(target);
                             ui.memory_mut(|memory| {
                                 if let Some(id) = memory.focused() {
                                     memory.surrender_focus(id);
@@ -746,10 +775,11 @@ impl MapperApp {
                 if self.shortcut_capture.is_some() {
                     self.stop_shortcut_capture();
                 }
-                if mapping {
-                    self.mapping_input.clear();
-                } else {
-                    self.keyboard_trigger_input.clear();
+                match target {
+                    0 => self.mapping_input.clear(),
+                    1 => self.keyboard_trigger_input.clear(),
+                    2 => self.speed_up_input.clear(),
+                    _ => self.speed_down_input.clear(),
                 }
             }
         });
@@ -1129,8 +1159,30 @@ impl MapperApp {
             }
             ui.add_space(8.0);
             let features_locked = app_state().lock().unwrap().features_locked();
+            ui.horizontal(|ui| {
+                ui.label(game_text(language, "Game speed", "游戏加速"));
+                let multiplier = app_state().lock().unwrap().bound_process.as_ref()
+                    .and_then(|p| p.speed.as_ref()).map_or(1, |s| s.multiplier);
+                for speed in [1, 2, 4] {
+                    if ui.add_enabled(bound && (speed == 1 || (!features_locked && !paused)),
+                        egui::Button::new(format!("x{speed}")).selected(multiplier == speed)).clicked() {
+                        change_game_speed(Some(speed), false, None);
+                    }
+                }
+            });
+            let speed_keys = {
+                let state = app_state().lock().unwrap();
+                let key_label = |key: &str| if key.is_empty() {
+                    game_text(language, "Disabled", "未设置").to_string()
+                } else { key.replace("NumAdd", "Num +").replace("NumSubtract", "Num −") };
+                format!("{}: {} / {} · x1 ↔ x2 ↔ x4",
+                    game_text(language, "Shortcuts", "快捷键"),
+                    key_label(&state.config.speed_up), key_label(&state.config.speed_down))
+            };
+            ui.add(egui::Label::new(RichText::new(&speed_keys).small()).truncate())
+                .on_hover_text(speed_keys);
             ui.add_enabled_ui(!features_locked, |ui| {
-                let button_height = ((ui.available_height() - 64.0) / 2.0).clamp(48.0, 110.0);
+                let button_height = ((ui.available_height() - 132.0) / 2.0).clamp(48.0, 110.0);
                 for resume in [false, true] {
                     let enabled = ui.is_enabled() && if resume { paused } else { bound && !paused };
                     let label = if resume {
@@ -1233,7 +1285,7 @@ impl MapperApp {
                         let result = {
                             let mut state = app_state().lock().unwrap();
                             let result =
-                                state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                                state.bound_process.as_mut().map(|p| p.restore()).transpose();
                             if result.is_ok() {
                                 state.bound_process = None;
                                 state.auto_load_suppressed = true;
@@ -1267,10 +1319,10 @@ impl MapperApp {
                     }
                 }
             });
-        self.shortcut_input_row(ui, true);
+        self.shortcut_input_row(ui, 0);
         ui.label(RichText::new(text.mapping_hint).small().color(theme::MUTED));
         ui.label(game_text(self.language, "Keyboard trigger", "键盘触发键"));
-        self.shortcut_input_row(ui, false);
+        self.shortcut_input_row(ui, 1);
         ui.label(
             RichText::new(game_text(
                 self.language,
@@ -1280,6 +1332,15 @@ impl MapperApp {
             .small()
             .color(theme::MUTED),
         );
+        ui.separator();
+        ui.label(game_text(self.language, "Game speed shortcuts", "游戏加速快捷键"));
+        ui.label(game_text(self.language, "Speed up", "加速"));
+        self.shortcut_input_row(ui, 2);
+        ui.label(game_text(self.language, "Speed down", "减速"));
+        self.shortcut_input_row(ui, 3);
+        ui.label(RichText::new(game_text(self.language,
+            "NumAdd / NumSubtract = numpad + / −. Blank disables; save in Settings.",
+            "NumAdd / NumSubtract 表示小键盘 + / −；支持组合键，留空关闭，在设置页保存。")).small());
     }
 
     fn settings_controls(&mut self, ui: &mut egui::Ui) {
@@ -1305,6 +1366,8 @@ impl MapperApp {
                 self.selected_preset = 0;
                 self.mapping_input = PRESETS[0].to_string();
                 self.keyboard_trigger_input.clear();
+                self.speed_up_input = "NumAdd".into();
+                self.speed_down_input = "NumSubtract".into();
                 self.capture_enabled = true;
                 self.debug_logging = false;
                 self.pause_game_on_trigger = false;
@@ -1480,7 +1543,7 @@ impl MapperApp {
             let name = self.processes[index].name.clone();
             let result = {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
-                let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                let result = state.bound_process.as_mut().map(|p| p.restore()).transpose();
                 if result.is_ok() {
                     state.bind_process(self.processes.remove(index));
                     state.status =
@@ -1559,7 +1622,7 @@ impl eframe::App for MapperApp {
             }
             let result = {
                 let mut state = app_state().lock().expect("app state mutex poisoned");
-                let result = state.bound_process.as_mut().map(|p| p.resume()).transpose();
+                let result = state.bound_process.as_mut().map(|p| p.restore()).transpose();
                 if result.is_ok() && trainer_ready {
                     state.config.capture_enabled = false;
                 }
@@ -1804,6 +1867,8 @@ fn main() -> Result<()> {
     if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
         config.capture_enabled = false;
         config.keyboard_trigger.clear();
+        config.speed_up.clear();
+        config.speed_down.clear();
         config.auto_load_process = false;
         config.language = env::var("SLACKINPUT_UI_LANGUAGE")
             .ok()
@@ -1854,7 +1919,7 @@ fn main() -> Result<()> {
         let mut state = app_state().lock().expect("app state mutex poisoned");
         state.config.capture_enabled = false;
         if let Some(mut process) = state.bound_process.take() {
-            if let Err(error) = process.resume() {
+            if let Err(error) = process.restore() {
                 drop(state);
                 push_log_force(&format!("Resume on exit failed: {error}"));
             }
@@ -2351,25 +2416,60 @@ fn parse_keyboard_trigger(text: &str) -> Option<Option<(u32, u32)>> {
 }
 
 fn configure_keyboard(text: &str) -> std::result::Result<(), String> {
-    let language = current_language();
-    let hotkey = parse_keyboard_trigger(text).ok_or_else(|| {
-        game_text(
-            language,
-            "Invalid keyboard trigger: use F8 or Ctrl+Alt+Q",
-            "键盘触发键格式无效，请使用 F8 或 Ctrl+Alt+Q 等格式",
-        )
-        .to_string()
-    })?;
-    keyboard::configure(hotkey).map_err(|error| {
-        format!(
-            "{}: {error}",
-            game_text(
-                language,
-                "Keyboard trigger registration failed (possibly already in use)",
-                "键盘触发键注册失败（可能已被占用）",
-            )
-        )
-    })
+    let config = app_state().lock().unwrap().config.clone();
+    configure_shortcuts(text, &config.speed_up, &config.speed_down)
+}
+
+fn configure_shortcuts(trigger: &str, up: &str, down: &str) -> std::result::Result<(), String> {
+    let keys = parse_shortcuts(trigger, up, down)?;
+    keyboard::configure_all(keys).map_err(|e| format!("快捷键注册失败 / Shortcut registration failed: {e}"))
+}
+
+fn parse_shortcuts(trigger: &str, up: &str, down: &str) -> std::result::Result<[Option<(u32, u32)>; 3], String> {
+    let mut keys = [None; 3];
+    for (i, text) in [trigger, up, down].iter().enumerate() {
+        keys[i] = parse_keyboard_trigger(text)
+            .ok_or_else(|| format!("快捷键格式无效 / Invalid shortcut: {text}"))?;
+        if keys[i].is_some() && keys[..i].contains(&keys[i]) {
+            return Err("快捷键不能重复 / Shortcuts must be distinct".into());
+        }
+    }
+    Ok(keys)
+}
+
+fn speed_shortcut_target() -> Option<(u64, u32)> {
+    let state = app_state().lock().unwrap();
+    if !state.config.capture_enabled || state.features_locked() || macros::is_recording() { return None; }
+    state.bound_process.as_ref().filter(|p|
+        !p.exited() && !p.paused && process::foreground_pid() == p.pid)
+        .map(|p| (state.binding_generation, p.pid))
+}
+
+fn change_game_speed(requested: Option<u32>, up: bool, expected: Option<(u64, u32)>) {
+    let mut state = app_state().lock().unwrap();
+    let generation = state.binding_generation;
+    if requested.is_none() && (!state.config.capture_enabled || macros::is_recording()
+        || expected != state.bound_process.as_ref().map(|p| (generation, p.pid))
+        || state.bound_process.as_ref().is_none_or(|p| process::foreground_pid() != p.pid)) {
+        return;
+    }
+    if state.features_locked() && requested != Some(1) { return; }
+    let Some(process) = state.bound_process.as_mut().filter(|p| !p.exited()) else { return; };
+    if process.paused && requested != Some(1) { return; }
+    let current = process.speed.as_ref().map_or(1, |s| s.multiplier);
+    let next = requested.unwrap_or_else(|| if up { (current * 2).min(4) } else { (current / 2).max(1) });
+    if next == current && requested != Some(1) { return; }
+    if next == 1 && process.speed.is_none() { return; }
+    let result = (|| -> std::result::Result<(), String> {
+        if process.speed.is_none() {
+            process.speed = Some(trainer::SpeedSession::open(&process.trainer_target(generation)?)?);
+        }
+        process.speed.as_mut().unwrap().set(next)
+    })();
+    state.status = match result {
+        Ok(()) => format!("游戏计时倍率 / Game clock: x{next}（实际效果取决于游戏 / effect depends on game）"),
+        Err(e) => format!("游戏加速失败 / Game speed failed: {e}"),
+    };
 }
 
 fn keyboard_trigger_released(modifiers: u32, key: u32) -> bool {
@@ -2414,6 +2514,8 @@ fn parse_token(token: &str) -> Option<VIRTUAL_KEY> {
         "ESC" | "ESCAPE" => VK_ESCAPE,
         "ENTER" | "RETURN" => VK_RETURN,
         "SPACE" => VK_SPACE,
+        "NUMADD" => VIRTUAL_KEY(0x6B),
+        "NUMSUBTRACT" => VIRTUAL_KEY(0x6D),
         "BACKSPACE" => VIRTUAL_KEY(0x08),
         "INSERT" => VIRTUAL_KEY(0x2D),
         "DELETE" | "DEL" => VIRTUAL_KEY(0x2E),
@@ -2597,6 +2699,8 @@ fn parse_config(contents: &str) -> AppConfig {
         };
         match key.trim() {
             "keyboard_trigger" => config.keyboard_trigger = value.trim().to_string(),
+            "speed_up" => config.speed_up = value.trim().to_string(),
+            "speed_down" => config.speed_down = value.trim().to_string(),
             "mapping" => config.mapping_text = value.trim().to_string(),
             "capture_enabled" => config.capture_enabled = value.trim().eq_ignore_ascii_case("true"),
             "debug_logging" => config.debug_logging = value.trim().eq_ignore_ascii_case("true"),
@@ -2671,6 +2775,7 @@ fn config_body(config: &AppConfig) -> String {
         config.focus_style.key()
     );
     body.push_str(&format!("keyboard_trigger={}\n", config.keyboard_trigger));
+    body.push_str(&format!("speed_up={}\nspeed_down={}\n", config.speed_up, config.speed_down));
     body
 }
 
@@ -2858,6 +2963,24 @@ mod config_tests {
             assert!(parse_keyboard_trigger(&text).is_some());
         }
         assert!(captured_key(egui::Key::F35, egui::Modifiers::NONE, false).is_none());
+    }
+
+    #[test]
+    fn speed_shortcuts_default_round_trip_and_reject_duplicates() {
+        let old = parse_config("keyboard_trigger=F8\n");
+        assert_eq!(old.speed_up, "NumAdd");
+        assert_eq!(old.speed_down, "NumSubtract");
+        assert_eq!(parse_shortcuts("F8", &old.speed_up, &old.speed_down).unwrap(),
+            [Some((0, 0x77)), Some((0, 0x6b)), Some((0, 0x6d))]);
+        let custom = AppConfig { speed_up: "Ctrl+F9".into(), speed_down: String::new(), ..old };
+        let loaded = parse_config(&config_body(&custom));
+        assert_eq!(loaded.speed_up, "Ctrl+F9");
+        assert!(loaded.speed_down.is_empty());
+        assert!(parse_shortcuts("F8", "f8", "NumSubtract").is_err());
+        assert!(parse_shortcuts("", "NumAdd", "numadd").is_err());
+        assert!(parse_shortcuts("", "Num+", "NumSubtract").is_err());
+        assert_eq!(parse_keyboard_trigger("Ctrl+NumAdd"), Some(Some((2, 0x6b))));
+        assert_eq!(parse_shortcuts("", "", "").unwrap(), [None; 3]);
     }
 
     #[test]

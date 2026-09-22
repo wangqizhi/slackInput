@@ -5,6 +5,7 @@ mod ui;
 mod worker;
 
 pub use native::creation_time;
+pub use native::speed::Session as SpeedSession;
 pub use ui::TrainerUi;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

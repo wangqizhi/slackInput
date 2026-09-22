@@ -29,6 +29,8 @@ use windows::Win32::{
 };
 
 type Result<T> = std::result::Result<T, String>;
+#[path = "speed.rs"]
+pub mod speed;
 fn error(e: windows::core::Error) -> String {
     e.to_string()
 }

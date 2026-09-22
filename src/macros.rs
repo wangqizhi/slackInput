@@ -350,22 +350,14 @@ fn settle_focus(ms: u64, cancel: &AtomicU64, generation: u64, playback: &Playbac
     }
 }
 fn execute(m: &Macro, cancel: &AtomicU64, generation: u64, playback: &Playback, manual: bool) {
-    let shortcut = crate::app_state()
-        .lock()
-        .unwrap()
-        .config
-        .keyboard_trigger
-        .clone();
-    if let Some(trigger) = crate::parse_keyboard_trigger(&shortcut).flatten() {
-        if m.steps
-            .iter()
-            .any(|s| crate::parse_keyboard_trigger(&s.keys).flatten() == Some(trigger))
-        {
-            crate::set_status(
-                "宏输出与快捷键触发冲突 / Macro output conflicts with shortcut trigger",
-            );
-            return;
-        }
+    let shortcuts = {
+        let state = crate::app_state().lock().unwrap();
+        [state.config.keyboard_trigger.clone(), state.config.speed_up.clone(), state.config.speed_down.clone()]
+    };
+    if shortcuts.iter().filter_map(|s| crate::parse_keyboard_trigger(s).flatten())
+        .any(|trigger| m.steps.iter().any(|s| crate::parse_keyboard_trigger(&s.keys).flatten() == Some(trigger))) {
+        crate::set_status("宏输出与快捷键触发冲突 / Macro output conflicts with shortcut trigger");
+        return;
     }
     if manual {
         execution_status(
@@ -581,7 +573,7 @@ impl Editor {
         RECORDING.store(true, Ordering::SeqCst);
         let result = self
             .runtime(vec![], false)
-            .and_then(|()| crate::keyboard::configure(None))
+            .and_then(|()| crate::keyboard::configure_all([None; 3]))
             .and_then(|()| recording::Recording::start());
         match result {
             Ok(recording) => {

@@ -27,6 +27,7 @@ impl Drop for OwnedHandle {
 }
 
 pub struct BoundProcess {
+    pub speed: Option<crate::trainer::SpeedSession>,
     handle: OwnedHandle,
     pub pid: u32,
     pub name: String,
@@ -53,6 +54,7 @@ impl BoundProcess {
             ),
             pid: std::process::id(),
             name: "Window test".into(),
+            speed: None,
             paused: false,
         }
     }
@@ -80,9 +82,20 @@ impl BoundProcess {
     }
 }
 
+impl BoundProcess {
+    pub fn restore(&mut self) -> Result<()> {
+        let speed_result = self.speed.as_mut().map(|speed| {
+            speed.set(1).map_err(|e| windows::core::Error::new(
+                windows::core::HRESULT(0x80004005u32 as i32), e))
+        }).transpose();
+        let resume_result = self.resume();
+        speed_result.and(resume_result)
+    }
+}
+
 impl Drop for BoundProcess {
     fn drop(&mut self) {
-        let _ = self.resume();
+        let _ = self.restore();
     }
 }
 
@@ -116,6 +129,7 @@ pub fn enumerate() -> Result<Vec<BoundProcess>> {
                     handle: OwnedHandle(handle),
                     pid: entry.th32ProcessID,
                     name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                    speed: None,
                     paused: false,
                 });
             }
@@ -175,6 +189,7 @@ mod tests {
             handle: OwnedHandle(handle),
             pid: child.0.id(),
             name: "test".into(),
+            speed: None,
             paused: false,
         };
         process.suspend().unwrap();
