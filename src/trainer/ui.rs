@@ -10,9 +10,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const WINDOW_ID: &str = "trainer_window";
 pub struct TrainerUi {
-    pub open: bool,
     worker: Worker,
     directory: PathBuf,
     target: Option<Target>,
@@ -22,14 +20,12 @@ pub struct TrainerUi {
     local_error: String,
     closing: bool,
     preview: bool,
-    preview_frames: u32,
     overwrite: HashSet<String>,
     delete: Option<String>,
 }
 impl TrainerUi {
     pub fn new(directory: PathBuf) -> Self {
         Self {
-            open: false,
             worker: Worker::new(directory.clone()),
             directory,
             target: None,
@@ -39,7 +35,6 @@ impl TrainerUi {
             local_error: String::new(),
             closing: false,
             preview: false,
-            preview_frames: 0,
             overwrite: HashSet::new(),
             delete: None,
         }
@@ -74,7 +69,6 @@ impl TrainerUi {
             self.closing = true;
             self.worker.stop_all(true);
         }
-        self.open = true;
         false
     }
     pub fn exit_ready(&mut self) -> bool {
@@ -94,7 +88,6 @@ impl TrainerUi {
     #[cfg(debug_assertions)]
     pub fn preview(&mut self) {
         self.preview = true;
-        self.open = true;
         self.worker.state.profile = Some(profile::builtin());
         self.worker.state.busy = false;
         self.worker.state.message = "界面预览：未连接游戏，不会执行修改".into();
@@ -113,47 +106,8 @@ impl TrainerUi {
             self.inputs.insert("money".into(), "123456".into());
         }
     }
-    pub fn show(&mut self, ctx: &egui::Context, language: Language) {
-        if !self.open {
-            return;
-        }
-        let title = game_text(language, "Trainer", "修改器");
-        if self.preview {
-            let mut open = self.open;
-            egui::Window::new(title)
-                .id(egui::Id::new(WINDOW_ID))
-                .open(&mut open)
-                .default_pos([20.0, 20.0])
-                .default_size([680.0, 730.0])
-                .show(ctx, |ui| self.contents(ui, language));
-            self.open = open;
-            return;
-        }
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of(WINDOW_ID),
-            egui::ViewportBuilder::default()
-                .with_title(title)
-                .with_inner_size([680.0, 760.0])
-                .with_min_inner_size([540.0, 440.0]),
-            |ctx, class| {
-                if class == egui::ViewportClass::Embedded {
-                    let mut open = self.open;
-                    egui::Window::new(title)
-                        .id(egui::Id::new(WINDOW_ID))
-                        .open(&mut open)
-                        .default_size([640.0, 650.0])
-                        .show(ctx, |ui| self.contents(ui, language));
-                    self.open = open;
-                } else {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        self.open = false;
-                    }
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::new().fill(theme::BG).inner_margin(18))
-                        .show(ctx, |ui| self.contents(ui, language));
-                }
-            },
-        );
+    pub fn show(&mut self, ui: &mut egui::Ui, language: Language) {
+        self.contents(ui, language);
     }
     fn management(&mut self, ui: &mut egui::Ui, language: Language) {
         let state = self.worker.state.clone();
@@ -237,7 +191,7 @@ impl TrainerUi {
                         for f in &draft.profile.features {
                             let key = profile::name_key(&f.name);
                             if conflicts.iter().any(|x| x.id == f.id) {
-                                ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
                                     ui.label(&f.name);
                                     let mut replace = self.overwrite.contains(&key);
                                     ui.radio_value(&mut replace, true, "覆盖");
@@ -305,10 +259,15 @@ impl TrainerUi {
         if crate::app_state().lock().unwrap().features_locked() {
             ui.disable();
         }
-        self.preview_frames = self.preview_frames.saturating_add(1);
         let state = self.worker.state.clone();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-        self.management(ui, language);
+        if state.draft.is_some() || self.delete.is_some() {
+            self.management(ui, language);
+        } else {
+            egui::CollapsingHeader::new(game_text(language, "Manage profiles", "配置管理"))
+                .id_salt("trainer_management")
+                .show(ui, |ui| self.management(ui, language));
+        }
         if state.draft.is_some() {
             if self.worker.state.busy {
                 ui.spinner();
@@ -358,7 +317,7 @@ impl TrainerUi {
                     &profile.name
                 },
             )
-            .size(21.0)
+            .size(17.0)
             .strong(),
         );
         let total = profile.features.len();
@@ -395,14 +354,22 @@ impl TrainerUi {
                 ),
             );
         }
-        ui.label(RichText::new(game_text(language, "Game effects still need validation. Closing this window keeps active options running.", "游戏效果尚待实测；关闭面板保留已启用项，退出程序前停用全部。" )).small().color(theme::GOLD));
+        ui.label(
+            RichText::new(game_text(
+                language,
+                "Game effects still need validation. Switching tabs keeps active options running.",
+                "游戏效果尚待实测；切换页签保留已启用项，退出程序前停用全部。",
+            ))
+            .small()
+            .color(theme::GOLD),
+        );
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .desired_width(200.0)
-                    .hint_text(game_text(language, "Search options", "搜索功能")),
-            );
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .desired_width(ui.available_width())
+                .hint_text(game_text(language, "Search options", "搜索功能")),
+        );
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut self.available_only,
                 game_text(language, "Adapted only", "仅已适配"),
@@ -429,20 +396,34 @@ impl TrainerUi {
             && !state.cleanup_failed
             && !pending_target
             && state.target.is_some();
-        let scroll = egui::ScrollArea::vertical()
-            .id_salt("trainer_options")
-            .auto_shrink([false, false])
-            .max_height((ui.available_height() - 90.0).max(120.0));
-        #[cfg(debug_assertions)]
-        let scroll = if self.preview
-            && self.preview_frames == 3
-            && std::env::var_os("SLACKINPUT_UI_SCROLL_BOTTOM").is_some()
-        {
-            scroll.vertical_scroll_offset(10000.0)
-        } else {
-            scroll
-        };
-        scroll.show(ui, |ui| {
+        if state.busy || state.error || state.cleanup_failed || !self.local_error.is_empty() {
+            if state.busy || (pending_target && !state.error) {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(game_text(language, "Processing…", "正在处理…"));
+                });
+            } else {
+                ui.label(RichText::new(&state.message).color(if state.error {
+                    theme::GOLD
+                } else {
+                    theme::MUTED
+                }));
+            }
+            if !self.local_error.is_empty() {
+                ui.colored_label(theme::GOLD, &self.local_error);
+            }
+            if state.cleanup_failed {
+                ui.colored_label(
+                    theme::GOLD,
+                    game_text(
+                        language,
+                        "Use Disable all to retry cleanup before continuing.",
+                        "请点击“停用全部”重试恢复，再继续操作。",
+                    ),
+                );
+            }
+        }
+        ui.scope(|ui| {
             let mut count = 0;
             let mut groups: Vec<&str> = Vec::new();
             for f in &profile.features {
@@ -496,38 +477,35 @@ impl TrainerUi {
                         .inner_margin(10)
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    let controls_width = if !matches!(feature.input, Input::Toggle)
-                                    {
-                                        335.0
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(label).strong());
+                                ui.label(
+                                    RichText::new(if active {
+                                        game_text(language, "Enabled", "已启用")
+                                    } else if supported && feature.one_shot() {
+                                        game_text(
+                                            language,
+                                            "Apply once to selected Digimon",
+                                            "一次性应用到当前数码宝贝",
+                                        )
+                                    } else if supported {
+                                        game_text(
+                                            language,
+                                            "Off · needs game validation",
+                                            "未启用 · 待游戏实测",
+                                        )
                                     } else {
-                                        285.0
-                                    };
-                                    ui.set_width((ui.available_width() - controls_width).max(90.0));
-                                    ui.label(RichText::new(label).strong());
-                                    ui.label(
-                                        RichText::new(if active {
-                                            game_text(language, "Enabled", "已启用")
-                                        } else if supported && feature.one_shot() {
-                                            game_text(
-                                                language,
-                                                "Apply once to selected Digimon",
-                                                "一次性应用到当前数码宝贝",
-                                            )
-                                        } else if supported {
-                                            game_text(
-                                                language,
-                                                "Off · needs game validation",
-                                                "未启用 · 待游戏实测",
-                                            )
-                                        } else {
-                                            game_text(language, "Not adapted", "待适配")
-                                        })
-                                        .small()
-                                        .color(if active { theme::MINT } else { theme::MUTED }),
-                                    );
-                                });
+                                        game_text(language, "Not adapted", "待适配")
+                                    })
+                                    .small()
+                                    .color(if active {
+                                        theme::MINT
+                                    } else {
+                                        theme::MUTED
+                                    }),
+                                );
+                            });
+                            ui.horizontal_wrapped(|ui| {
                                 if !matches!(feature.input, Input::Toggle) {
                                     let input = self
                                         .inputs
@@ -539,8 +517,6 @@ impl TrainerUi {
                                             "Enter a value, then enable or apply",
                                             "输入数值后点击启用或应用",
                                         ));
-                                } else {
-                                    ui.add_space(104.0);
                                 }
                                 if ui
                                     .add_enabled(
@@ -644,30 +620,8 @@ impl TrainerUi {
             }
         });
         ui.separator();
-        if state.busy || (pending_target && !state.error) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(game_text(language, "Processing…", "正在处理…"));
-            });
-        } else {
-            ui.label(RichText::new(&state.message).color(if state.error {
-                theme::GOLD
-            } else {
-                theme::MUTED
-            }));
-        }
-        if !self.local_error.is_empty() {
-            ui.colored_label(theme::GOLD, &self.local_error);
-        }
-        if state.cleanup_failed {
-            ui.colored_label(
-                theme::GOLD,
-                game_text(
-                    language,
-                    "Use Disable all to retry cleanup before continuing.",
-                    "请点击“停用全部”重试恢复，再继续操作。",
-                ),
-            );
+        if !state.busy && !state.error && !state.message.is_empty() {
+            ui.label(RichText::new(&state.message).small().color(theme::MUTED));
         }
         ui.label(
             RichText::new(game_text(

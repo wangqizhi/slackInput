@@ -3,6 +3,7 @@
 mod anti_cheat;
 mod desktop;
 mod keyboard;
+mod macros;
 mod marker;
 mod process;
 mod startup;
@@ -389,6 +390,7 @@ impl AppState {
 }
 
 struct MapperApp {
+    macros: macros::Editor,
     trainer: trainer::TrainerUi,
     shortcut_capture: Option<bool>,
     captured_shortcut: Option<String>,
@@ -456,6 +458,7 @@ impl MapperApp {
 
         let mut app = Self {
             trainer: trainer::TrainerUi::new(config_dir().join("trainers")),
+            macros: macros::Editor::new(),
             shortcut_capture: None,
             captured_shortcut: None,
             settings_tab: 0,
@@ -494,12 +497,13 @@ impl MapperApp {
             && env::var_os("SLACKINPUT_UI_TRAINER").is_some()
         {
             self.trainer.preview();
+            self.settings_tab = 1;
         }
         if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some() {
             self.settings_tab = env::var("SLACKINPUT_UI_TAB")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
+                .unwrap_or(self.settings_tab);
         }
         if env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
             && env::var_os("SLACKINPUT_UI_PICKER").is_some()
@@ -642,7 +646,7 @@ impl MapperApp {
         let Some(mapping) = self.shortcut_capture else {
             return;
         };
-        if !ctx.input(|input| input.focused) || self.settings_tab != 1 {
+        if !ctx.input(|input| input.focused) || self.settings_tab != 3 {
             self.stop_shortcut_capture();
             return;
         }
@@ -1241,12 +1245,6 @@ impl MapperApp {
                             report_process_error(language, error);
                         }
                     }
-                    if ui
-                        .button(game_text(language, "Trainer", "修改器"))
-                        .clicked()
-                    {
-                        self.trainer.open = true;
-                    }
                 });
             });
         });
@@ -1282,22 +1280,6 @@ impl MapperApp {
             .small()
             .color(theme::MUTED),
         );
-        ui.add_space(18.0);
-        ui.separator();
-        theme::heading(ui, "02", game_text(self.language, "Key macros", "按键宏"));
-        ui.label(
-            RichText::new(game_text(
-                self.language,
-                "Reserved for future key sequences and timing controls.",
-                "预留区域：后续添加按键序列、间隔与循环设置。",
-            ))
-            .color(theme::MUTED),
-        );
-        ui.add_enabled(
-            false,
-            egui::Button::new(game_text(self.language, "Coming soon", "即将支持")),
-        );
-        ui.add_space(70.0);
     }
 
     fn settings_controls(&mut self, ui: &mut egui::Ui) {
@@ -1536,6 +1518,7 @@ impl eframe::App for MapperApp {
                 .into();
             }
         }
+        self.macros.tick(ctx, self.settings_tab == 2);
         self.update_shortcut_capture(ctx);
         let trainer_target = {
             let state = app_state().lock().unwrap();
@@ -1571,6 +1554,7 @@ impl eframe::App for MapperApp {
         if ctx.input(|input| input.viewport().close_requested()) {
             let trainer_ready = self.trainer.prepare_exit();
             if !trainer_ready {
+                self.settings_tab = 1;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
             let result = {
@@ -1656,7 +1640,6 @@ impl eframe::App for MapperApp {
                     for (open, id) in [
                         (self.process_picker_open, PROCESS_PICKER_WINDOW_ID),
                         (self.debug_window_open, DEBUG_LOG_WINDOW_ID),
-                        (self.trainer.open, trainer::WINDOW_ID),
                     ] {
                         if let Some(rect) = open
                             .then(|| ctx.memory(|mem| mem.area_rect(egui::Id::new(id))))
@@ -1713,6 +1696,8 @@ impl eframe::App for MapperApp {
                 ui.horizontal(|ui| {
                     for (index, label) in [
                         game_text(self.language, "Game", "游戏"),
+                        game_text(self.language, "Trainer", "修改器"),
+                        game_text(self.language, "Key macros", "按键宏"),
                         game_text(self.language, "Shortcuts", "快捷键"),
                         game_text(self.language, "Settings", "设置"),
                     ]
@@ -1756,6 +1741,10 @@ impl eframe::App for MapperApp {
                             theme::card().show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 if self.settings_tab == 1 {
+                                    self.trainer.show(ui, self.language);
+                                } else if self.settings_tab == 2 {
+                                    self.macros.show(ui, self.language);
+                                } else if self.settings_tab == 3 {
                                     self.shortcuts_tab(ui);
                                 } else {
                                     self.settings_controls(ui);
@@ -1772,7 +1761,6 @@ impl eframe::App for MapperApp {
             self.process_picker_open = false;
         }
         self.process_picker(ctx);
-        self.trainer.show(ctx, self.language);
 
         if self.debug_window_open {
             egui::Window::new(text.logs)
@@ -1838,16 +1826,7 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(
-                if cfg!(debug_assertions)
-                    && env::var_os("SLACKINPUT_UI_SNAPSHOT").is_some()
-                    && env::var_os("SLACKINPUT_UI_TRAINER").is_some()
-                {
-                    [740.0, 840.0]
-                } else {
-                    [480.0, 560.0]
-                },
-            )
+            .with_inner_size([480.0, 560.0])
             .with_min_inner_size([440.0, 480.0])
             .with_resizable(true)
             .with_decorations(false)
@@ -2227,6 +2206,9 @@ fn should_trigger_from_raw_hid(hid_info: Option<RID_DEVICE_INFO_HID>, report: &[
 }
 
 fn trigger_mapping(device_name: &str) -> Result<()> {
+    if macros::is_recording() {
+        return Ok(());
+    }
     if !capture_enabled() {
         push_log_if_debug(tr(current_language()).capture_disabled_log);
         return Ok(());

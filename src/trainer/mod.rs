@@ -6,7 +6,6 @@ mod worker;
 
 pub use native::creation_time;
 pub use ui::TrainerUi;
-pub use ui::WINDOW_ID;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
