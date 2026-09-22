@@ -10,7 +10,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -144,14 +144,45 @@ fn register(macros: &[Macro]) -> Result<(), String> {
     }
     Ok(())
 }
+// Macro input includes physical scan codes for games that do not consume VK-only events.
+fn macro_key_input(
+    key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    up: bool,
+) -> INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW, VIRTUAL_KEY,
+    };
+    let scan = unsafe { MapVirtualKeyW(u32::from(key.0), MAPVK_VK_TO_VSC_EX) };
+    let mut input = crate::key_input(key, up);
+    if scan != 0 && scan >> 8 != 0xE1 {
+        let keyboard = unsafe { &mut input.Anonymous.ki };
+        keyboard.wVk = VIRTUAL_KEY(0);
+        keyboard.wScan = (scan & 0xFF) as u16;
+        keyboard.dwFlags |= KEYEVENTF_SCANCODE;
+        // Some layouts return the navigation scan without its E0 prefix.
+        if scan >> 8 == 0xE0 || matches!(key.0, 0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C) {
+            keyboard.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        }
+    }
+    input
+}
+fn execution_status(name: &str, en: &str, zh: &str) {
+    let language = crate::current_language();
+    let text = if language == crate::Language::Chinese {
+        zh
+    } else {
+        en
+    };
+    crate::set_status(&format!("{text}: {name}"));
+}
 fn inject(keys: &[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY], up: bool) -> bool {
     let inputs: Vec<_> = if up {
         keys.iter()
             .rev()
-            .map(|&k| crate::key_input(k, true))
+            .map(|&k| macro_key_input(k, true))
             .collect()
     } else {
-        keys.iter().map(|&k| crate::key_input(k, false)).collect()
+        keys.iter().map(|&k| macro_key_input(k, false)).collect()
     };
     unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize == inputs.len() }
 }
@@ -167,7 +198,158 @@ fn wait(ms: u64, cancel: &AtomicU64, generation: u64) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-fn execute(m: &Macro, cancel: &AtomicU64) {
+#[derive(Default)]
+struct Playback {
+    running: AtomicBool,
+    paused: AtomicBool,
+    index: AtomicUsize,
+    session: AtomicU64,
+    target_pid: AtomicUsize,
+    binding: AtomicU64,
+}
+impl Playback {
+    fn begin(&self, index: usize) -> bool {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.session.fetch_add(1, Ordering::SeqCst);
+        self.target_pid.store(0, Ordering::SeqCst);
+        self.index.store(index, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        true
+    }
+    fn finish(&self) {
+        self.session.fetch_add(1, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+fn focus_game(playback: &Playback, resume: bool) -> Result<(), String> {
+    let state = crate::app_state().lock().unwrap();
+    if !permitted(&state) || is_recording() {
+        return Err("当前禁止执行宏 / Macro execution disabled".into());
+    }
+    let game = state
+        .bound_process
+        .as_ref()
+        .ok_or("请先在游戏页绑定进程 / Bind a game first")?;
+    let previous = playback.target_pid.load(Ordering::SeqCst) as u32;
+    if resume
+        && previous != 0
+        && (game.pid != previous
+            || state.binding_generation != playback.binding.load(Ordering::SeqCst))
+    {
+        return Err(
+            "绑定游戏已改变，请停止后重新运行 / Game binding changed; stop and run again".into(),
+        );
+    }
+    game.activate_window()?;
+    playback
+        .binding
+        .store(state.binding_generation, Ordering::SeqCst);
+    playback
+        .target_pid
+        .store(game.pid as usize, Ordering::SeqCst);
+    Ok(())
+}
+fn target_valid(playback: &Playback) -> bool {
+    let pid = playback.target_pid.load(Ordering::SeqCst) as u32;
+    if pid == 0 {
+        return true;
+    }
+    let state = crate::app_state().lock().unwrap();
+    state.binding_generation == playback.binding.load(Ordering::SeqCst)
+        && state
+            .bound_process
+            .as_ref()
+            .is_some_and(|p| p.pid == pid && !p.exited() && !p.paused)
+}
+// Pausing releases the current chord; resume consumes only its remaining hold time.
+fn phase(
+    ms: u64,
+    keys: &[windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY],
+    cancel: &AtomicU64,
+    generation: u64,
+    playback: &Playback,
+) -> Result<bool, ()> {
+    let mut remaining = Duration::from_millis(ms);
+    let mut held = false;
+    let result = loop {
+        if cancel.load(Ordering::SeqCst) != generation || !allowed() {
+            break Ok(false);
+        }
+        if !target_valid(playback) {
+            break Ok(false);
+        }
+        let pid = playback.target_pid.load(Ordering::SeqCst) as u32;
+        if pid != 0
+            && !playback.paused.load(Ordering::SeqCst)
+            && crate::process::foreground_pid() != pid
+        {
+            playback.paused.store(true, Ordering::SeqCst);
+            crate::set_status("游戏失去焦点，宏已暂停 / Game lost focus; macro paused");
+        }
+        if playback.paused.load(Ordering::SeqCst) {
+            if held {
+                held = false;
+                if !inject(keys, true) {
+                    break Err(());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        if remaining.is_zero() {
+            break Ok(true);
+        }
+        if !held && !keys.is_empty() {
+            held = true;
+            if !inject(keys, false) {
+                break Err(());
+            }
+        }
+        let start = Instant::now();
+        std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        remaining = remaining.saturating_sub(start.elapsed());
+    };
+    if held && !inject(keys, true) {
+        return Err(());
+    }
+    result
+}
+// A manual run must not fire into whatever window still holds focus while the game is
+// still coming up; wait for the target to hold focus and settle before the first key.
+// Never touches the paused flag: a focus flicker during warm-up must not wedge playback.
+fn settle_focus(ms: u64, cancel: &AtomicU64, generation: u64, playback: &Playback) -> bool {
+    let pid = playback.target_pid.load(Ordering::SeqCst) as u32;
+    if pid == 0 {
+        return false;
+    }
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    let mut focused_since: Option<Instant> = None;
+    loop {
+        if cancel.load(Ordering::SeqCst) != generation || !allowed() || !target_valid(playback) {
+            return false;
+        }
+        if crate::process::foreground_pid() == pid {
+            let since = focused_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_millis(300) {
+                return true;
+            }
+        } else {
+            focused_since = None;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+fn execute(m: &Macro, cancel: &AtomicU64, generation: u64, playback: &Playback, manual: bool) {
     let shortcut = crate::app_state()
         .lock()
         .unwrap()
@@ -185,25 +367,47 @@ fn execute(m: &Macro, cancel: &AtomicU64) {
             return;
         }
     }
-    let generation = cancel.load(Ordering::SeqCst);
+    if manual {
+        execution_status(
+            &m.name,
+            "Game activated; starting shortly",
+            "游戏已激活，即将运行",
+        );
+        if !settle_focus(2000, cancel, generation, playback) {
+            execution_status(&m.name, "Macro stopped", "宏已停止");
+            return;
+        }
+    }
+    execution_status(&m.name, "Running macro", "正在执行宏");
     for _ in 0..m.repeats {
         for s in &m.steps {
             if !wait(0, cancel, generation) {
+                execution_status(&m.name, "Macro stopped", "宏已停止");
                 return;
             }
             let keys = crate::parse_mapping(&s.keys).unwrap();
-            let sent = inject(&keys, false);
-            let keep = sent && wait(s.hold_ms, cancel, generation);
-            let released = inject(&keys, true);
-            if !sent || !released {
-                crate::set_status("宏输入发送失败 / Macro SendInput failed");
-                return;
-            }
-            if !keep || !wait(s.delay_ms, cancel, generation) {
-                return;
+            for (ms, output) in [(s.hold_ms, keys.as_slice()), (s.delay_ms, &[][..])] {
+                match phase(ms, output, cancel, generation, playback) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        execution_status(&m.name, "Macro stopped", "宏已停止");
+                        return;
+                    }
+                    Err(()) => {
+                        crate::set_status(
+                            "宏输入发送失败，请检查目标程序权限 / Macro SendInput failed; check target privileges",
+                        );
+                        return;
+                    }
+                }
             }
         }
     }
+    execution_status(
+        &m.name,
+        "Macro input sent (game response not verified)",
+        "宏输入已发送（不代表游戏已响应）",
+    );
 }
 type Request = (Vec<Macro>, bool, mpsc::Sender<Result<(), String>>);
 pub struct Editor {
@@ -212,6 +416,8 @@ pub struct Editor {
     cancel: Arc<AtomicU64>,
     message: String,
     applied: Vec<Macro>,
+    playback: Arc<Playback>,
+    runs: mpsc::Sender<(Macro, u64)>,
     recording: Option<recording::Recording>,
 }
 impl Editor {
@@ -237,6 +443,9 @@ impl Editor {
         let (tx, rx) = mpsc::channel::<Request>();
         let cancel = Arc::new(AtomicU64::new(0));
         let signal = cancel.clone();
+        let playback = Arc::new(Playback::default());
+        let playing = playback.clone();
+        let (runs, run_rx) = mpsc::channel::<(Macro, u64)>();
         std::thread::spawn(move || {
             let mut active: Vec<Macro> = vec![];
             let mut pending = None;
@@ -277,6 +486,12 @@ impl Editor {
                     _ => {}
                 }
                 let mut msg = MSG::default();
+                if let Ok((macro_, generation)) = run_rx.try_recv() {
+                    pending = None;
+                    execute(&macro_, &signal, generation, &playing, true);
+                    playing.finish();
+                    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {}
+                }
                 while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
                     if msg.message == WM_HOTKEY && allowed() {
                         let i = msg.wParam.0.wrapping_sub(100);
@@ -293,7 +508,10 @@ impl Editor {
                         pending = None;
                     } else if crate::keyboard_trigger_released(mods, key) {
                         pending = None;
-                        execute(&active[i], &signal);
+                        if playing.begin(i) {
+                            execute(&active[i], &signal, generation, &playing, false);
+                            playing.finish();
+                        }
                         // Drop queued and injected hotkeys; macros cannot recursively trigger macros.
                         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {}
                     }
@@ -313,6 +531,8 @@ impl Editor {
             cancel,
             message,
             applied: vec![],
+            playback,
+            runs,
             recording: None,
         };
         if editor.message.is_empty() && std::env::var_os("SLACKINPUT_UI_SNAPSHOT").is_none() {
@@ -484,14 +704,20 @@ impl Editor {
         if self.recording.is_some() {
             return;
         }
+        ui.label(t("Run/Resume activates the bound game. Losing game focus pauses playback. Pause releases held keys.", "运行/继续会自动切到已绑定游戏；游戏失去焦点时自动暂停，暂停会松开按键。"));
         let mut remove = None;
+        let mut run = None;
+        let busy = self.playback.running.load(Ordering::SeqCst);
         for (i, m) in self.macros.iter_mut().enumerate() {
             ui.push_id(i, |ui| {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.enabled, t("Enabled", "启用"));
                     ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(140.0));
-                    if ui.button(t("Delete", "删除")).clicked() {
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(t("Delete", "删除")))
+                        .clicked()
+                    {
                         remove = Some(i);
                     }
                 });
@@ -500,6 +726,52 @@ impl Editor {
                     ui.add(egui::TextEdit::singleline(&mut m.trigger).desired_width(110.0));
                     ui.label(t("Repeats", "次数"));
                     ui.add(egui::DragValue::new(&mut m.repeats).range(1..=10000));
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!busy && allowed(), egui::Button::new(t("Run", "运行")))
+                        .clicked()
+                    {
+                        run = Some((i, m.clone()));
+                    }
+                    let mine = busy && self.playback.index.load(Ordering::SeqCst) == i;
+                    let paused = self.playback.paused.load(Ordering::SeqCst);
+                    if ui
+                        .add_enabled(
+                            mine,
+                            egui::Button::new(if paused {
+                                t("Resume", "继续")
+                            } else {
+                                t("Pause", "暂停")
+                            }),
+                        )
+                        .clicked()
+                    {
+                        if paused {
+                            match focus_game(&self.playback, true) {
+                                Ok(()) => {
+                                    self.playback.paused.store(false, Ordering::SeqCst);
+                                    self.message =
+                                        t("Game activated; resumed", "游戏已激活，继续执行").into();
+                                }
+                                Err(e) => self.message = e,
+                            }
+                        } else {
+                            self.playback.paused.store(true, Ordering::SeqCst);
+                            self.message = t(
+                                "Paused; held keys will be released",
+                                "已请求暂停，将释放按键",
+                            )
+                            .into();
+                        }
+                    }
+                    if mine {
+                        ui.label(if paused {
+                            t("Paused", "已暂停")
+                        } else {
+                            t("Running", "运行中")
+                        });
+                    }
                 });
                 let mut action = None;
                 for (j, s) in m.steps.iter_mut().enumerate() {
@@ -537,6 +809,42 @@ impl Editor {
         if let Some(i) = remove {
             self.macros.remove(i);
         }
+        if let Some((i, m)) = run {
+            let mut validation = Vec::new();
+            let mut draft = m.clone();
+            draft.enabled = false; // Manual tests need no registered trigger.
+            validation.push(draft);
+            let result = validate(&validation).and_then(|()| {
+                for step in &m.steps {
+                    let output = crate::parse_keyboard_trigger(&step.keys).flatten();
+                    if self.applied.iter().any(|active| {
+                        active.enabled
+                            && crate::parse_keyboard_trigger(&active.trigger).flatten() == output
+                    }) {
+                        return Err(
+                            "输出与已启用宏触发键冲突 / Output conflicts with active macro trigger"
+                                .into(),
+                        );
+                    }
+                }
+                if !self.playback.begin(i) {
+                    return Err("已有宏正在运行 / A macro is running".into());
+                }
+                if let Err(e) = focus_game(&self.playback, false) {
+                    self.playback.finish();
+                    return Err(e);
+                }
+                let generation = self.cancel.load(Ordering::SeqCst);
+                if let Err(e) = self.runs.send((m, generation)) {
+                    self.playback.finish();
+                    return Err(e.to_string());
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                self.message = e;
+            }
+        }
     }
 }
 impl Drop for Editor {
@@ -557,6 +865,67 @@ impl Drop for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playback_rejects_concurrent_runs_and_invalidates_old_resume() {
+        let playback = Playback::default();
+        assert!(playback.begin(2));
+        let session = playback.session.load(Ordering::SeqCst);
+        assert!(!playback.begin(3));
+        assert_eq!(playback.index.load(Ordering::SeqCst), 2);
+        playback.paused.store(true, Ordering::SeqCst);
+        playback.finish();
+        assert!(playback.begin(3));
+        assert_ne!(session, playback.session.load(Ordering::SeqCst));
+        assert!(!playback.paused.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn paused_playback_can_be_cancelled_without_resuming() {
+        let playback = Playback::default();
+        playback.begin(0);
+        playback.paused.store(true, Ordering::SeqCst);
+        assert_eq!(
+            phase(60000, &[], &AtomicU64::new(1), 0, &playback),
+            Ok(false)
+        );
+    }
+    #[test]
+    fn settle_focus_never_blocks_on_cancellation() {
+        let playback = Playback::default();
+        playback.begin(0);
+        playback
+            .target_pid
+            .store(u64::from(u32::MAX) as usize, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(!settle_focus(60000, &AtomicU64::new(1), 0, &playback));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Without a target pid there is nothing to wait for: refuse instead of firing
+        // into the current foreground window.
+        playback.target_pid.store(0, Ordering::SeqCst);
+        assert!(!settle_focus(60000, &AtomicU64::new(1), 0, &playback));
+    }
+    #[test]
+    fn macro_scan_codes_preserve_release_and_extended_keys() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+        };
+        for name in ["W", "Ctrl", "Alt", "Shift", "Left", "Delete", "Win"] {
+            let key = crate::parse_token(name).unwrap();
+            let down = unsafe { macro_key_input(key, false).Anonymous.ki };
+            let up = unsafe { macro_key_input(key, true).Anonymous.ki };
+            assert_ne!(down.wScan, 0, "{name}");
+            assert_eq!(down.wVk.0, 0);
+            assert!(down.dwFlags.contains(KEYEVENTF_SCANCODE));
+            assert!(!down.dwFlags.contains(KEYEVENTF_KEYUP));
+            assert_eq!(up.wScan, down.wScan);
+            assert_eq!(up.dwFlags, down.dwFlags | KEYEVENTF_KEYUP);
+            assert_eq!(
+                down.dwFlags.contains(KEYEVENTF_EXTENDEDKEY),
+                matches!(name, "Left" | "Delete" | "Win"),
+                "{name}: scan={:x}",
+                down.wScan
+            );
+        }
+    }
     #[test]
     fn anti_cheat_lock_blocks_macros_and_recording_until_confirmed_clear() {
         let mut state = crate::AppState::new(crate::AppConfig::default(), vec![]);
