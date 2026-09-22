@@ -1667,10 +1667,14 @@ impl eframe::App for MapperApp {
                                 .color(theme::MINT),
                         ));
                         ui.label(
-                            RichText::new(game_text(
-                                self.language,
-                                "GAME COMPANION",
-                                "游戏助手 / 随时切换",
+                            RichText::new(format!(
+                                "{} · v{}",
+                                game_text(
+                                    self.language,
+                                    "GAME COMPANION",
+                                    "游戏助手 / 随时切换",
+                                ),
+                                env!("CARGO_PKG_VERSION"),
                             ))
                             .small()
                             .color(theme::MUTED),
@@ -1900,7 +1904,7 @@ fn main() -> Result<()> {
                     .expect("embedded icon"),
             )
             .with_maximize_button(false)
-            .with_title("SlackInput"),
+            .with_title(concat!("SlackInput v", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
 
