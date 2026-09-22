@@ -16,7 +16,7 @@ pub struct TrainerUi {
     target: Option<Target>,
     inputs: HashMap<String, String>,
     search: String,
-    available_only: bool,
+    enabled_only: bool,
     local_error: String,
     closing: bool,
     preview: bool,
@@ -31,7 +31,7 @@ impl TrainerUi {
             target: None,
             inputs: HashMap::new(),
             search: String::new(),
-            available_only: false,
+            enabled_only: false,
             local_error: String::new(),
             closing: false,
             preview: false,
@@ -371,8 +371,8 @@ impl TrainerUi {
         );
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(
-                &mut self.available_only,
-                game_text(language, "Adapted only", "仅已适配"),
+                &mut self.enabled_only,
+                game_text(language, "Enabled only", "仅启用"),
             );
             if ui
                 .add_enabled(
@@ -443,7 +443,7 @@ impl TrainerUi {
                     .iter()
                     .filter(|f| {
                         f.group == group
-                            && (!self.available_only || profile::supported(profile, &f.id))
+                            && (!self.enabled_only || state.active.contains_key(&f.id))
                             && (query.is_empty()
                                 || format!("{} {} {}", f.name, f.name_en, f.id)
                                     .to_lowercase()
@@ -616,7 +616,19 @@ impl TrainerUi {
                 }
             }
             if count == 0 {
-                ui.label(game_text(language, "No matching options", "没有匹配的功能"));
+                ui.label(if self.enabled_only {
+                    if query.is_empty() {
+                        game_text(language, "No enabled options", "暂无已启用的修改项")
+                    } else {
+                        game_text(
+                            language,
+                            "No matching enabled options",
+                            "没有匹配的已启用修改项",
+                        )
+                    }
+                } else {
+                    game_text(language, "No matching options", "没有匹配的功能")
+                });
             }
         });
         ui.separator();
