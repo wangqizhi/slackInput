@@ -109,6 +109,9 @@ impl TrainerUi {
     pub fn show(&mut self, ui: &mut egui::Ui, language: Language) {
         self.contents(ui, language);
     }
+    pub fn previewing(&self) -> bool {
+        self.preview
+    }
     fn management(&mut self, ui: &mut egui::Ui, language: Language) {
         let state = self.worker.state.clone();
         let ready = !state.busy
@@ -261,6 +264,13 @@ impl TrainerUi {
         }
         let state = self.worker.state.clone();
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        if state.target != self.target && !state.cleanup_failed {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(game_text(language, "Loading trainer…", "正在加载修改器…"));
+            });
+            return;
+        }
         if state.draft.is_some() || self.delete.is_some() {
             self.management(ui, language);
         } else {
@@ -291,22 +301,66 @@ impl TrainerUi {
         let Some(profile) = state
             .profile
             .as_ref()
+            .filter(|profile| !profile.features.is_empty())
             .or_else(|| self.preview.then_some(&catalog))
         else {
+            if state.busy || state.target != self.target {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(game_text(language, "Loading trainer…", "正在加载修改器…"));
+                });
+                return;
+            }
             ui.heading(game_text(
                 language,
                 "No matching trainer",
                 "未找到匹配的修改器",
             ));
-            ui.label(&state.message);
+            if state.profile.as_ref().is_some_and(|p| p.features.is_empty()) {
+                ui.label(game_text(
+                    language,
+                    "The profile for this process has no options yet.",
+                    "当前进程的配置尚无修改项。",
+                ));
+            } else if state.error {
+                ui.colored_label(theme::GOLD, &state.message);
+            } else {
+                ui.label(&state.message);
+            }
             if !self.local_error.is_empty() {
                 ui.colored_label(theme::GOLD, &self.local_error);
             }
-            ui.label(game_text(
-                language,
-                "Bind Digimon Story Time Stranger.exe to load the built-in profile.",
-                "绑定 Digimon Story Time Stranger.exe 后自动加载内置配置。",
-            ));
+            if state.target.is_some() {
+                ui.label(game_text(
+                    language,
+                    "Import a compatible trainer EXE to add a profile for this process.",
+                    "可导入与当前进程匹配的修改器 EXE，添加对应配置。",
+                ));
+                ui.label(
+                    RichText::new(game_text(
+                        language,
+                        "The current importer recognizes only the verified Digimon Story Time Stranger source EXE.",
+                        "当前导入器仅识别已验证的《数码宝贝物语：时空异客》来源 EXE。",
+                    ))
+                    .small()
+                    .color(theme::MUTED),
+                );
+                if ui
+                    .add_enabled(
+                        !state.cleanup_failed && !self.closing && !self.preview,
+                        egui::Button::new(game_text(
+                            language,
+                            "Import trainer EXE",
+                            "导入修改器 EXE",
+                        )),
+                    )
+                    .clicked()
+                {
+                    self.overwrite.clear();
+                    self.delete = None;
+                    self.worker.analyze();
+                }
+            }
             return;
         };
         ui.label(

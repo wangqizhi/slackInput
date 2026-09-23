@@ -1159,30 +1159,8 @@ impl MapperApp {
             }
             ui.add_space(8.0);
             let features_locked = app_state().lock().unwrap().features_locked();
-            ui.horizontal(|ui| {
-                ui.label(game_text(language, "Game speed", "游戏加速"));
-                let multiplier = app_state().lock().unwrap().bound_process.as_ref()
-                    .and_then(|p| p.speed.as_ref()).map_or(1, |s| s.multiplier);
-                for speed in [1, 2, 4] {
-                    if ui.add_enabled(bound && (speed == 1 || (!features_locked && !paused)),
-                        egui::Button::new(format!("x{speed}")).selected(multiplier == speed)).clicked() {
-                        change_game_speed(Some(speed), false, None);
-                    }
-                }
-            });
-            let speed_keys = {
-                let state = app_state().lock().unwrap();
-                let key_label = |key: &str| if key.is_empty() {
-                    game_text(language, "Disabled", "未设置").to_string()
-                } else { key.replace("NumAdd", "Num +").replace("NumSubtract", "Num −") };
-                format!("{}: {} / {} · x1 ↔ x2 ↔ x4",
-                    game_text(language, "Shortcuts", "快捷键"),
-                    key_label(&state.config.speed_up), key_label(&state.config.speed_down))
-            };
-            ui.add(egui::Label::new(RichText::new(&speed_keys).small()).truncate())
-                .on_hover_text(speed_keys);
             ui.add_enabled_ui(!features_locked, |ui| {
-                let button_height = ((ui.available_height() - 132.0) / 2.0).clamp(48.0, 110.0);
+                let button_height = ((ui.available_height() - 116.0) / 2.0).clamp(48.0, 110.0);
                 for resume in [false, true] {
                     let enabled = ui.is_enabled() && if resume { paused } else { bound && !paused };
                     let label = if resume {
@@ -1299,6 +1277,42 @@ impl MapperApp {
                     }
                 });
             });
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(theme::BG)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(game_text(language, "Game speed", "游戏加速"))
+                                .small()
+                                .color(theme::MUTED),
+                        );
+                        ui.add_space(12.0);
+                        let multiplier = app_state()
+                            .lock()
+                            .unwrap()
+                            .bound_process
+                            .as_ref()
+                            .and_then(|p| p.speed.as_ref())
+                            .map_or(1, |s| s.multiplier);
+                        for speed in [1, 2, 4] {
+                            if ui
+                                .add_enabled(
+                                    bound && (speed == 1 || (!features_locked && !paused)),
+                                    egui::Button::new(format!("x{speed}"))
+                                        .selected(multiplier == speed)
+                                        .min_size(vec2(42.0, 26.0)),
+                                )
+                                .clicked()
+                            {
+                                change_game_speed(Some(speed), false, None);
+                            }
+                        }
+                    });
+                });
         });
     }
 
@@ -1591,6 +1605,15 @@ impl eframe::App for MapperApp {
                 .and_then(|p| p.trainer_target(state.binding_generation).ok())
         };
         self.trainer.sync_target(trainer_target);
+        let trainer_tab_visible = {
+            let state = app_state().lock().unwrap();
+            (state.bound_process.as_ref().is_some_and(|p| !p.exited())
+                || self.trainer.previewing())
+                && !state.features_locked()
+        };
+        if !trainer_tab_visible && self.settings_tab == 1 {
+            self.settings_tab = 0;
+        }
         if self.trainer.exit_ready() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1771,6 +1794,9 @@ impl eframe::App for MapperApp {
                     .iter()
                     .enumerate()
                     {
+                        if index == 1 && !trainer_tab_visible {
+                            continue;
+                        }
                         ui.selectable_value(&mut self.settings_tab, index, *label);
                     }
                 });

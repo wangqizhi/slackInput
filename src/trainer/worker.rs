@@ -205,8 +205,7 @@ fn run(
                         }
                         .into();
                     } else {
-                        state.profile = repository.resolve(profile::GAME_PROCESS)?;
-                        state.message = "可管理配置；启用功能请先绑定游戏进程".into();
+                        state.message = "请先选择游戏进程".into();
                     }
                 }
                 Command::DismissDraft => {
@@ -381,8 +380,14 @@ mod tests {
         let cancel = Arc::new(AtomicU64::new(1));
         let token = cancel.clone();
         let thread = thread::spawn(move || run(commands, updates, token, repo));
+        let target = Target {
+            pid: std::process::id(),
+            name: profile::GAME_PROCESS.into(),
+            generation: 1,
+            created: 0,
+        };
         send.send(Command::Bind {
-            target: None,
+            target: Some(target.clone()),
             epoch: 1,
         })
         .unwrap();
@@ -409,6 +414,14 @@ mod tests {
         send.send(Command::Bind {
             target: None,
             epoch: 2,
+        })
+        .unwrap();
+        let unbound = recv.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(unbound.profile.is_none());
+        cancel.store(3, Ordering::Release);
+        send.send(Command::Bind {
+            target: Some(target),
+            epoch: 3,
         })
         .unwrap();
         assert!(
